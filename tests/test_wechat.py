@@ -3,6 +3,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 import usd1_monitor.scheduler as scheduler
+import usd1_monitor.notifications.wechat as wechat
 from tests.fakes import FakeHttp
 from usd1_monitor.engine.state import StateEngine
 from usd1_monitor.models import RiskLevel, RiskTransition, RuleEvaluation
@@ -17,6 +18,21 @@ from usd1_monitor.scheduler import _deliver_pending
 
 NOW = datetime(2026, 9, 7, 4, 30, tzinfo=UTC)
 WEBHOOK = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=redacted"
+
+
+def test_plain_text_helpers_render_chinese_status_time_and_sources() -> None:
+    assert wechat._level_heading(RiskLevel.YELLOW, recovered=False) == "🟡 USD1 注意"
+    assert wechat._level_heading(RiskLevel.GREEN, recovered=True) == "🟢 USD1 已恢复正常"
+    assert wechat._display_time(NOW, "Asia/Shanghai") == (
+        "2026-09-07 12:30:00（北京时间）"
+    )
+    assert wechat._source_urls(
+        {"source_urls": ["https://one", "https://two"]}
+    ) == [
+        "https://one",
+        "https://two",
+    ]
+    assert wechat._source_urls({}) == []
 
 
 @pytest.mark.asyncio

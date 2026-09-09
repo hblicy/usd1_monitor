@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from datetime import datetime
 from typing import Iterable, Protocol
 
 from usd1_monitor.models import RiskLevel, RiskTransition
@@ -16,6 +17,30 @@ class WeChatDeliveryError(RuntimeError):
 
 
 WECHAT_TEXT_MAX_BYTES = 2048
+LEVEL_LABELS = {
+    RiskLevel.GREEN: "🟢 USD1 正常",
+    RiskLevel.YELLOW: "🟡 USD1 注意",
+    RiskLevel.RED: "🔴 USD1 危险",
+}
+
+
+def _level_heading(level: RiskLevel, *, recovered: bool) -> str:
+    if recovered:
+        return "🟢 USD1 已恢复正常"
+    return LEVEL_LABELS[level]
+
+
+def _display_time(value: datetime | str, timezone_name: str) -> str:
+    localized = datetime.fromisoformat(local_iso(value, timezone_name))
+    return f"{localized:%Y-%m-%d %H:%M:%S}（北京时间）"
+
+
+def _source_urls(evidence: dict[str, object]) -> list[str]:
+    raw_urls = evidence.get("source_urls")
+    if isinstance(raw_urls, (list, tuple)):
+        return [str(url) for url in raw_urls if url]
+    source_url = evidence.get("source_url")
+    return [str(source_url)] if source_url else []
 
 
 def split_wechat_text(
