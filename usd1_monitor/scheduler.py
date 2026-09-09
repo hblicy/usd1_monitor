@@ -34,7 +34,7 @@ from usd1_monitor.engine.evm_rules import (
     EvmFact,
     evaluate_evm_fact,
 )
-from usd1_monitor.engine.health import evaluate_health
+from usd1_monitor.engine.health import evaluate_health_with_recovery
 from usd1_monitor.engine.information_rules import (
     classify_official_text,
     next_attestation_due_at,
@@ -2277,6 +2277,8 @@ async def _record_health(
     error: str | None = None,
     critical: bool = False,
 ) -> None:
+    risk_state = await storage.get_risk_state(f"health.{collector_id}")
+    previous_level = risk_state.level if risk_state is not None else RiskLevel.GREEN
     if success:
         await storage.record_collector_success(collector_id, now)
     else:
@@ -2285,7 +2287,12 @@ async def _record_health(
         )
     health = await storage.get_collector_health(collector_id)
     assert health is not None
-    level = evaluate_health(health, now, critical=critical)
+    level = evaluate_health_with_recovery(
+        health,
+        now,
+        critical=critical,
+        previous_level=previous_level,
+    )
     if collector_id == "notification_wechat" and await storage.failed_alerts():
         level = max(level, RiskLevel.YELLOW)
     await StateEngine(storage).apply(
