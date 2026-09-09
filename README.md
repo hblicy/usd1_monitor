@@ -46,6 +46,8 @@ python -m usd1_monitor --config config.yaml status
 - `GREEN → YELLOW/RED`、`YELLOW → RED`：通知一次。
 - 同等级持续：不重复通知。
 - `RED → YELLOW/GREEN`、`YELLOW → GREEN`：满足恢复条件后通知。
+- 官方信息首次采集和超过 24 小时的历史公告只建立基线；之后的新公告或正文变化才参与风险判断。
+- 官方信息事件超过观察窗口时静默转为绿色，不发送逐条“event window expired”通知；真正的规则恢复仍通知。
 - 采集器连续失败 3 次为黄色监控盲区；Binance 盘口或 PoR 在已有成功记录后超过 15 分钟无成功观测为红色盲区。
 - 企业微信 HTTP 200 仍检查业务 `errcode`；失败最多尝试两次，未成功不会标记为已送达。
 - `FACT` 是直接链上/交易所事实；`ESTIMATED_SOURCE` 是外部估算来源；`ESTIMATED` 是 `PoR reserves / DefiLlama global supply` 的辅助比率，不是完整多链审计结论。
@@ -93,6 +95,18 @@ sudo journalctl -u usd1-monitor -f
 ```bash
 sudo -u usd1-monitor sqlite3 /var/lib/usd1-monitor/monitor.db ".backup '/var/lib/usd1-monitor/monitor-backup.db'"
 ```
+
+如果旧版本已经产生大量官方公告误报，部署本修复时可一次性清理尚未发送的对应队列。必须先停止旧进程，先预览再删除；以下操作不影响已发送历史、风险状态或其他类型告警：
+
+```bash
+sudo systemctl stop usd1-monitor
+sudo -u usd1-monitor sqlite3 /var/lib/usd1-monitor/monitor.db ".backup '/var/lib/usd1-monitor/monitor-before-information-alert-fix-20260909.db'"
+sudo -u usd1-monitor sqlite3 /var/lib/usd1-monitor/monitor.db "SELECT id,status,alert_key FROM alert_deliveries WHERE delivered_at IS NULL AND status IN ('PENDING','IN_FLIGHT') AND (alert_key LIKE 'official:%' OR alert_key LIKE 'expiry:event.information.%') ORDER BY id;"
+sudo -u usd1-monitor sqlite3 /var/lib/usd1-monitor/monitor.db "BEGIN IMMEDIATE; DELETE FROM alert_deliveries WHERE delivered_at IS NULL AND status IN ('PENDING','IN_FLIGHT') AND (alert_key LIKE 'official:%' OR alert_key LIKE 'expiry:event.information.%'); COMMIT;"
+sudo systemctl start usd1-monitor
+```
+
+源码目录直接运行时，将数据库路径替换为 `config.yaml` 的 `database_path`（例如 `data/monitor.db`），并确保 `run` 进程已经停止。
 
 ## 排障
 

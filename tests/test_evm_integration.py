@@ -823,6 +823,32 @@ async def test_composite_monitor_recovers_expired_event_state(storage) -> None:
 
 
 @pytest.mark.asyncio
+async def test_information_event_expiry_is_silent_but_other_expiry_is_visible(
+    storage,
+) -> None:
+    old = datetime.now(UTC) - __import__("datetime").timedelta(hours=2)
+    information_rule = "event.information.binance.old-risk.hash"
+    evm_rule = "event.evm.ethereum.0xold:0"
+    await storage.set_risk_state(
+        information_rule, RiskLevel.YELLOW, old, old
+    )
+    await storage.set_risk_state(evm_rule, RiskLevel.YELLOW, old, old)
+    monitor = Usd1Monitor(FakeMarketMonitor(), [], storage, None)
+
+    await monitor.check_once(deliver=False)
+
+    information_state = await storage.get_risk_state(information_rule)
+    evm_state = await storage.get_risk_state(evm_rule)
+    assert information_state is not None
+    assert information_state.level is RiskLevel.GREEN
+    assert evm_state is not None
+    assert evm_state.level is RiskLevel.GREEN
+    pending = await storage.pending_alerts()
+    assert len(pending) == 1
+    assert pending[0].alert_key.startswith(f"expiry:{evm_rule}:")
+
+
+@pytest.mark.asyncio
 async def test_startup_notification_failure_does_not_stop_monitor(storage) -> None:
     class FailingNotifier:
         async def send_text(self, content: str) -> None:

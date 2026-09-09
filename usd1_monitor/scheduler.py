@@ -61,6 +61,7 @@ from usd1_monitor.storage import Storage
 
 logger = logging.getLogger(__name__)
 _NOT_COLLECTED = object()
+_NEW_INFORMATION_ALERT_MAX_AGE = timedelta(hours=24)
 
 NOT_MONITORED = (
     "private_exchange_account",
@@ -1112,8 +1113,8 @@ class Usd1Monitor:
                 now - timedelta(seconds=self._storage.event_active_seconds)
             )
             if expired:
-                await StateEngine(self._storage).apply(
-                    [
+                def expiry_evaluations(states):
+                    return [
                         RuleEvaluation(
                             state.rule_id,
                             RiskLevel.GREEN,
@@ -1124,10 +1125,31 @@ class Usd1Monitor:
                             },
                             f"expiry:{state.rule_id}",
                         )
-                        for state in expired
-                    ],
-                    now,
-                )
+                        for state in states
+                    ]
+
+                information_expired = [
+                    state
+                    for state in expired
+                    if state.rule_id.startswith("event.information.")
+                ]
+                other_expired = [
+                    state
+                    for state in expired
+                    if not state.rule_id.startswith("event.information.")
+                ]
+                engine = StateEngine(self._storage)
+                if information_expired:
+                    await engine.apply(
+                        expiry_evaluations(information_expired),
+                        now,
+                        enqueue_alerts=False,
+                    )
+                if other_expired:
+                    await engine.apply(
+                        expiry_evaluations(other_expired),
+                        now,
+                    )
             if (
                 self._last_prune is not None
                 and (now - self._last_prune).total_seconds() < 86400
@@ -2079,6 +2101,13 @@ class InformationMonitor:
         checked_at: datetime,
     ) -> None:
         evaluations: list[RuleEvaluation] = []
+        source_health = await self._storage.get_collector_health(
+            f"official_{source_name}"
+        )
+        source_has_baseline = (
+            source_health is not None
+            and source_health.last_success_at is not None
+        )
         previous_attestation = (
             await self._storage.latest_announcement("bitgo")
             if source_name == "bitgo"
@@ -2095,9 +2124,17 @@ class InformationMonitor:
                         continue
                     if source_name == "bitgo":
                         changed_bitgo_ids.add(item.stable_id)
+                    if outcome == "NEW":
+                        if item.published_at is not None:
+                            if item.published_at < (
+                                checked_at - _NEW_INFORMATION_ALERT_MAX_AGE
+                            ):
+                                continue
+                        elif not source_has_baseline:
+                            continue
                     body_text = str(item.metadata.get("body_text", ""))
                     classification = classify_official_text(
-                        f"{item.title} {body_text}"
+                        f"{item.title}. {body_text}"
                     )
                     if classification.level is RiskLevel.YELLOW:
                         evaluations.append(
@@ -2106,7 +2143,10 @@ class InformationMonitor:
                                 RiskLevel.YELLOW,
                                 {
                                     "current": outcome,
-                                    "threshold": "official risk keyword",
+                                    "threshold": (
+                                        "official risk phrase: "
+                                        f"{classification.evidence}"
+                                    ),
                                     "data_time": checked_at.isoformat(),
                                     "source_url": item.url,
                                     "title": item.title,
