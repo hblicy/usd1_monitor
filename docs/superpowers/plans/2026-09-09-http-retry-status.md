@@ -67,7 +67,7 @@ Run: `python -m pytest -q -m "not live"`
 
 Expected: all offline tests PASS.
 
-- [ ] **Step 6: Commit the implementation**
+- [x] **Step 6: Commit the implementation**
 
 ```bash
 git add tests/test_http.py usd1_monitor/http.py docs/superpowers/plans/2026-09-09-http-retry-status.md
