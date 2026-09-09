@@ -1,0 +1,221 @@
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+
+import pytest
+
+from usd1_monitor.cli import async_main, build_market_monitor
+from usd1_monitor.collectors.announcements import BinancePartialCollectionError
+from usd1_monitor.config import AppConfig
+from usd1_monitor.models import Announcement
+from usd1_monitor.scheduler import CheckResult, NOT_MONITORED
+
+
+class FakeMonitor:
+    def __init__(self, success: bool) -> None:
+        self.success = success
+        self.deliver_arguments: list[bool] = []
+
+    async def check_once(self, *, deliver: bool = True) -> CheckResult:
+        self.deliver_arguments.append(deliver)
+        return CheckResult(self.success, () if self.success else ("binance failed",))
+
+
+class FakeHttp:
+    async def close(self) -> None:
+        return None
+
+
+def write_config(path: Path, database_path: Path) -> None:
+    path.write_text(
+        f"database_path: '{database_path.as_posix()}'\n",
+        encoding="utf-8",
+    )
+
+
+@pytest.mark.asyncio
+async def test_invalid_configuration_exits_two(tmp_path: Path) -> None:
+    config = tmp_path / "config.yaml"
+    config.write_text("market: []\n", encoding="utf-8")
+
+    assert await async_main(["--config", str(config), "check"]) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("success", "exit_code"), [(True, 0), (False, 1)])
+async def test_check_exit_code_and_no_delivery(
+    tmp_path: Path, success: bool, exit_code: int
+) -> None:
+    config = tmp_path / "config.yaml"
+    write_config(config, tmp_path / "monitor.db")
+    monitor = FakeMonitor(success)
+
+    def builder(app_config, storage):
+        return monitor, FakeHttp()
+
+    result = await async_main(
+        ["--config", str(config), "check"], monitor_builder=builder
+    )
+
+    assert result == exit_code
+    assert monitor.deliver_arguments == [False]
+
+
+@pytest.mark.asyncio
+async def test_status_lists_every_not_monitored_item(tmp_path: Path, capsys) -> None:
+    config = tmp_path / "config.yaml"
+    write_config(config, tmp_path / "monitor.db")
+
+    assert await async_main(["--config", str(config), "status"]) == 0
+    output = capsys.readouterr().out
+    assert all(item in output for item in NOT_MONITORED)
+
+
+@pytest.mark.asyncio
+async def test_cli_loads_adjacent_dotenv_without_overriding_environment(
+    tmp_path: Path, monkeypatch
+) -> None:
+    config = tmp_path / "config.yaml"
+    write_config(config, tmp_path / "monitor.db")
+    (tmp_path / ".env").write_text(
+        "WECHAT_WEBHOOK=https://qyapi.weixin.qq.com/from-file\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(
+        "WECHAT_WEBHOOK", "https://qyapi.weixin.qq.com/from-environment"
+    )
+    captured = {}
+
+    def builder(app_config, storage):
+        captured["webhook"] = app_config.wechat_webhook
+        return FakeMonitor(True), FakeHttp()
+
+    assert await async_main(
+        ["--config", str(config), "check"], monitor_builder=builder
+    ) == 0
+    assert captured["webhook"] == "https://qyapi.weixin.qq.com/from-environment"
+
+
+@pytest.mark.asyncio
+async def test_cli_loads_webhook_from_adjacent_dotenv(tmp_path: Path, monkeypatch) -> None:
+    config = tmp_path / "config.yaml"
+    write_config(config, tmp_path / "monitor.db")
+    (tmp_path / ".env").write_text(
+        "WECHAT_WEBHOOK=https://qyapi.weixin.qq.com/from-file\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("WECHAT_WEBHOOK", raising=False)
+    captured = {}
+
+    def builder(app_config, storage):
+        captured["webhook"] = app_config.wechat_webhook
+        return FakeMonitor(True), FakeHttp()
+
+    assert await async_main(
+        ["--config", str(config), "check"], monitor_builder=builder
+    ) == 0
+    assert captured["webhook"] == "https://qyapi.weixin.qq.com/from-file"
+
+
+@pytest.mark.asyncio
+async def test_default_builder_wires_binance_persistence_providers(
+    storage,
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 9, 9, 12, tzinfo=UTC)
+    release_ms = int(now.timestamp() * 1000)
+    for source, stable_id, metadata in (
+        ("binance", "known", {"body_text": "USD1 prior body"}),
+        ("binance_scan", "recent-neutral", {"usd1_relevant": False}),
+        (
+            "binance_scan",
+            "recent-failure",
+            {"scan_error": "TimeoutError", "usd1_relevant": False},
+        ),
+    ):
+        await storage.upsert_announcement(
+            Announcement(
+                source,
+                stable_id,
+                "General service update",
+                f"https://www.binance.com/{stable_id}",
+                now,
+                stable_id,
+                now,
+                metadata,
+            )
+        )
+    await storage.upsert_announcement(
+        Announcement(
+            "binance_scan",
+            "expired-neutral",
+            "General service update",
+            "https://www.binance.com/expired-neutral",
+            now,
+            "expired-neutral",
+            now - timedelta(days=2),
+            {"usd1_relevant": False},
+        )
+    )
+
+    entries = [
+        {
+            "code": stable_id,
+            "title": "General service update",
+            "releaseDate": release_ms - index,
+        }
+        for index, stable_id in enumerate(
+            (
+                "known",
+                "recent-neutral",
+                "recent-failure",
+                "expired-neutral",
+                "new-neutral",
+            )
+        )
+    ]
+
+    class BinanceHttp:
+        detail_calls: list[str] = []
+
+        async def get_json(self, url: str, params=None):
+            if "detail/query" not in url:
+                return {
+                    "code": "000000",
+                    "data": {"catalogs": [{"articles": entries}]},
+                }
+            stable_id = params["articleCode"]
+            self.detail_calls.append(stable_id)
+            body = (
+                "USD1 withdrawals are restricted"
+                if stable_id == "known"
+                else "ABC service update"
+            )
+            return {
+                "code": "000000",
+                "data": {"body": f"<main>{body}</main>"},
+            }
+
+    monitor, real_http = build_market_monitor(
+        AppConfig(database_path=tmp_path / "unused.db"),
+        storage,
+    )
+    information = monitor._information
+    assert information is not None
+    collector = information._sources["binance"]
+    fake_http = BinanceHttp()
+    collector._http = fake_http
+
+    try:
+        with pytest.raises(BinancePartialCollectionError) as error:
+            await collector.collect(now)
+    finally:
+        await real_http.close()
+
+    assert [item.stable_id for item in error.value.items] == ["known"]
+    assert fake_http.detail_calls == ["known", "new-neutral", "expired-neutral"]
+    assert await storage.announcement_stable_ids("binance_scan") == {
+        "recent-neutral",
+        "recent-failure",
+        "expired-neutral",
+        "new-neutral",
+    }

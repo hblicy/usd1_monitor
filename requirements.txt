@@ -1,0 +1,10 @@
+aiohttp>=3.10,<4
+aiosqlite>=0.20,<1
+pydantic>=2.10,<3
+PyYAML>=6,<7
+python-dotenv>=1,<2
+eth-abi>=5,<6
+eth-utils>=5,<7
+eth-hash[pycryptodome]>=0.7,<1
+beautifulsoup4>=4.12,<5
+pypdf>=5,<7

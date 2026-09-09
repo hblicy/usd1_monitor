@@ -1,0 +1,77 @@
+database_path: data/monitor.db
+timezone: Asia/Shanghai
+retention_days: 180
+event_active_seconds: 3600
+market:
+  symbols:
+    - USD1USDT
+    - USD1USDC
+  interval_seconds: 60
+  depth_limit: 1000
+  yellow_price: 0.997
+  yellow_seconds: 900
+  red_price: 0.995
+  red_seconds: 300
+  severe_price: 0.99
+  severe_seconds: 3600
+  recovery_price: 0.998
+  recovery_seconds: 900
+  sell_sizes:
+    - 1000000
+    - 5000000
+    - 20000000
+http:
+  timeout_seconds: 10
+  retries: 2
+  max_response_bytes: 20000000
+logging:
+  path: logs/usd1-monitor.log
+  max_bytes: 10000000
+  backup_count: 5
+chains:
+  ethereum:
+    chain_id: 1
+    token_address: "0x8d0D000Ee44948FC98c9B98A4FA4921476f08B0d"
+    rpc_urls:
+      - https://ethereum-rpc.publicnode.com
+      - https://eth.llamarpc.com
+    confirmation_depth: 3
+    interval_seconds: 30
+    overlap_blocks: 20
+    scan_batch_blocks: 60
+  bsc:
+    chain_id: 56
+    token_address: "0x8d0D000Ee44948FC98c9B98A4FA4921476f08B0d"
+    rpc_urls:
+      - https://bsc-dataseed.binance.org
+      - https://bsc-rpc.publicnode.com
+    confirmation_depth: 10
+    interval_seconds: 15
+    overlap_blocks: 20
+    scan_batch_blocks: 60
+watched_addresses: []
+por:
+  address: "0x691b74146cdba162449012aa32d3cbf5df77d4c4"
+  interval_seconds: 300
+  yellow_staleness_seconds: 3600
+  red_staleness_seconds: 7200
+  relative_change_threshold: 0.005
+  recovery_read_count: 2
+supply:
+  interval_seconds: 3600
+  defillama_url: https://stablecoins.llama.fi/stablecoins
+  expected_symbol: USD1
+  expected_name: World Liberty Financial USD
+information:
+  binance:
+    url: https://www.binance.com/bapi/apex/v1/public/apex/cms/article/list/query
+    interval_seconds: 900
+  bitgo:
+    url: https://www.bitgo.com/usd1/attestations/
+    interval_seconds: 21600
+  wlfi:
+    url: https://docs.worldlibertyfinancial.com/usd1-token/proof-of-reserves
+    interval_seconds: 21600
+  occ:
+    url: https://www.occ.gov/topics/charters-and-licensing/interpretations-and-decisions/index-interpretations-and-decisions.html
+    interval_seconds: 21600

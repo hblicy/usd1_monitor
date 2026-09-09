@@ -1,0 +1,16 @@
+{
+  "peggedAssets": [
+    {
+      "id": "101",
+      "symbol": "USD1",
+      "name": "Unitas",
+      "circulating": {"peggedUSD": 125000000}
+    },
+    {
+      "id": "202",
+      "symbol": "USD1",
+      "name": "World Liberty Financial USD",
+      "circulating": {"peggedUSD": 4200000000}
+    }
+  ]
+}
