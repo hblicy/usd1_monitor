@@ -890,6 +890,41 @@ async def test_startup_notification_consumes_shared_delivery_rate_limit(storage)
 
 
 @pytest.mark.asyncio
+async def test_composite_startup_notification_uses_plain_chinese(storage) -> None:
+    class RecordingNotifier:
+        messages: list[str] = []
+
+        async def send_text(self, content: str) -> None:
+            self.messages.append(content)
+
+    class Chain:
+        def __init__(self, chain: str) -> None:
+            self.chain = chain
+
+    notifier = RecordingNotifier()
+    monitor = Usd1Monitor(
+        FakeMarketMonitor(),
+        [Chain("ethereum"), Chain("bsc")],
+        storage,
+        notifier,
+        reserve_supply=object(),
+        information=object(),
+    )
+
+    await monitor.send_startup_once()
+
+    assert len(notifier.messages) == 1
+    message = notifier.messages[0]
+    assert message.startswith("🟢 USD1 监控已启动")
+    assert "Ethereum 链上合约" in message
+    assert "BNB Chain 链上合约" in message
+    assert "储备与供应量" in message
+    assert "官方公告" in message
+    for hidden in ("enabled_collectors", "NOT_MONITORED", "evm_bsc"):
+        assert hidden not in message
+
+
+@pytest.mark.asyncio
 async def test_composite_run_can_stop_gracefully(storage) -> None:
     class StoppingMarket:
         monitor = None

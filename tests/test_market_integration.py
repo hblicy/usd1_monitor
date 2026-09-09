@@ -60,8 +60,13 @@ async def test_startup_notice_is_sent_once_and_not_from_check(
     await monitor.send_startup_once()
 
     assert len(fake_notifier.messages) == 1
-    assert "0.1.0" in fake_notifier.messages[0]
-    assert "NOT_MONITORED" in fake_notifier.messages[0]
+    message = fake_notifier.messages[0]
+    assert message.startswith("🟢 USD1 监控已启动")
+    assert "正在监控：\n价格、流动性、交易状态" in message
+    assert "暂未覆盖：" in message
+    assert "社交媒体情绪" in message
+    for hidden in ("enabled_collectors", "NOT_MONITORED", "binance_market"):
+        assert hidden not in message
 
 
 @pytest.mark.asyncio

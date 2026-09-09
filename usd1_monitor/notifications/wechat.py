@@ -53,6 +53,16 @@ FACT_LABELS = {
     "BURN": "检测到大额 USD1 销毁",
     "REORG_CORRECTION": "链上重组导致先前事件被修正",
 }
+NOT_MONITORED_LABELS = {
+    "private_exchange_account": "私有交易所账户",
+    "active_conversion_probe": "主动兑换测试",
+    "tron_solana_aptos_tempo_bridges": "Tron、Solana、Aptos、Tempo 跨链桥",
+    "binance_wallet_concentration": "Binance 钱包集中度",
+    "social_media_sentiment": "社交媒体情绪",
+    "defi_liquidations": "DeFi 清算",
+    "web_dashboard": "网页仪表盘",
+    "full_multichain_supply_reconciliation": "完整多链供应量核对",
+}
 
 
 def _level_heading(
@@ -79,6 +89,23 @@ def _source_urls(evidence: dict[str, object]) -> list[str]:
         return [str(url) for url in raw_urls if url]
     source_url = evidence.get("source_url")
     return [str(source_url)] if source_url else []
+
+
+def format_startup_message(
+    monitored: Iterable[str], not_monitored: Iterable[str]
+) -> str:
+    active = "、".join(dict.fromkeys(monitored))
+    missing = "、".join(
+        dict.fromkeys(
+            NOT_MONITORED_LABELS.get(item, "其他未覆盖能力")
+            for item in not_monitored
+        )
+    )
+    return (
+        "🟢 USD1 监控已启动\n\n"
+        f"正在监控：\n{active}\n\n"
+        f"暂未覆盖：\n{missing}"
+    )
 
 
 def _format_number(value: object) -> str:

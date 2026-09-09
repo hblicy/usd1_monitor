@@ -8,7 +8,6 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
-from usd1_monitor import __version__
 from usd1_monitor.config import MarketConfig
 from usd1_monitor.collectors.evm import (
     EvmScanner,
@@ -56,6 +55,7 @@ from usd1_monitor.models import (
     RiskLevel,
     RuleEvaluation,
 )
+from usd1_monitor.notifications.wechat import CHAIN_LABELS, format_startup_message
 from usd1_monitor.storage import Storage
 
 
@@ -365,10 +365,9 @@ class MarketMonitor:
     async def send_startup_once(self) -> None:
         if self._startup_sent or self._notifier is None:
             return
-        content = (
-            f"USD1 monitor {__version__} 已启动\n"
-            "enabled_collectors: binance_market\n"
-            f"NOT_MONITORED: {', '.join(NOT_MONITORED)}"
+        content = format_startup_message(
+            ("价格", "流动性", "交易状态"),
+            NOT_MONITORED,
         )
         await self._notifier.send_text(content)
         self._startup_sent = True
@@ -1251,18 +1250,18 @@ class Usd1Monitor:
             return
         if not await self._delivery_rate_limiter.try_acquire():
             return
-        enabled = "binance_market, " + ", ".join(
-            f"evm_{item.chain}" for item in self._evm_chains
+        monitored = ["价格", "流动性", "交易状态"]
+        monitored.extend(
+            f"{CHAIN_LABELS.get(item.chain, item.chain)} 链上合约"
+            for item in self._evm_chains
         )
         if self._reserve_supply is not None:
-            enabled += ", por, native_supply, defillama_supply"
+            monitored.append("储备与供应量")
         if self._information is not None:
-            enabled += ", official_binance, official_bitgo, official_wlfi, official_occ"
+            monitored.append("官方公告")
         try:
             await self._notifier.send_text(
-                f"USD1 monitor {__version__} 已启动\n"
-                f"enabled_collectors: {enabled}\n"
-                f"NOT_MONITORED: {', '.join(NOT_MONITORED)}"
+                format_startup_message(monitored, NOT_MONITORED)
             )
         except Exception as exc:
             await self._delivery_rate_limiter.defer()
