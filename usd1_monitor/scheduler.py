@@ -2108,6 +2108,21 @@ class InformationMonitor:
             source_health is not None
             and source_health.last_success_at is not None
         )
+        previously_scanned_binance_ids = (
+            await self._storage.announcement_stable_ids("binance_scan")
+            if source_name == "binance"
+            else set()
+        )
+        failed_binance_scan_ids = (
+            await self._storage.recent_announcement_failure_ids(
+                "binance_scan", datetime.min.replace(tzinfo=UTC)
+            )
+            if source_name == "binance"
+            else set()
+        )
+        successful_binance_scan_ids = (
+            previously_scanned_binance_ids - failed_binance_scan_ids
+        )
         previous_attestation = (
             await self._storage.latest_announcement("bitgo")
             if source_name == "bitgo"
@@ -2124,7 +2139,11 @@ class InformationMonitor:
                         continue
                     if source_name == "bitgo":
                         changed_bitgo_ids.add(item.stable_id)
-                    if outcome == "NEW":
+                    promoted_binance_scan = (
+                        source_name == "binance"
+                        and item.stable_id in successful_binance_scan_ids
+                    )
+                    if outcome == "NEW" and not promoted_binance_scan:
                         if item.published_at is not None:
                             if item.published_at < (
                                 checked_at - _NEW_INFORMATION_ALERT_MAX_AGE
@@ -2133,9 +2152,23 @@ class InformationMonitor:
                         elif not source_has_baseline:
                             continue
                     body_text = str(item.metadata.get("body_text", ""))
-                    classification = classify_official_text(
-                        f"{item.title}. {body_text}"
+                    raw_sections = item.metadata.get("body_sections")
+                    body_sections = (
+                        [
+                            section
+                            for section in raw_sections
+                            if isinstance(section, str) and section.strip()
+                        ]
+                        if isinstance(raw_sections, list)
+                        else [body_text]
                     )
+                    if not body_sections:
+                        body_sections = [body_text]
+                    classification = classify_official_text(item.title)
+                    for section in body_sections:
+                        if classification.level is RiskLevel.YELLOW:
+                            break
+                        classification = classify_official_text(section)
                     if classification.level is RiskLevel.YELLOW:
                         evaluations.append(
                             RuleEvaluation(

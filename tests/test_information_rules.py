@@ -1,5 +1,7 @@
 from datetime import date
 
+import pytest
+
 from usd1_monitor.engine.information_rules import (
     attestation_due_at,
     classify_official_text,
@@ -64,3 +66,68 @@ def test_direct_usd1_adverse_clause_is_returned_as_evidence() -> None:
 
     assert result.level is RiskLevel.YELLOW
     assert result.evidence == "USD1 withdrawals are suspended immediately"
+
+
+def test_unrestricted_usd1_withdrawals_are_not_risk() -> None:
+    result = classify_official_text("USD1 withdrawals are unrestricted")
+
+    assert result.level is RiskLevel.GREEN
+
+
+def test_explicitly_negated_suspension_is_not_risk() -> None:
+    result = classify_official_text(
+        "USD1 withdrawals will not be suspended"
+    )
+
+    assert result.level is RiskLevel.GREEN
+
+
+@pytest.mark.parametrize(
+    "text",
+    (
+        "Without notice, USD1 is suspended",
+        "USD1 is without warning suspended",
+        "USD1 无预警暂停提现",
+    ),
+)
+def test_warning_absence_does_not_negate_real_risk(text: str) -> None:
+    assert classify_official_text(text).level is RiskLevel.YELLOW
+
+
+@pytest.mark.parametrize(
+    "text",
+    (
+        "Restrictions do not apply to USD1",
+        "USD1 won't be suspended",
+        "USD1 restrictions are currently not applicable",
+        "USD1 restrictions do not currently apply",
+        "USD1 restrictions are not currently applicable",
+        "USD1 restrictions are no longer applicable",
+        "USD1 restrictions are presently no longer applicable",
+    ),
+)
+def test_other_explicit_negations_are_not_risk(text: str) -> None:
+    assert classify_official_text(text).level is RiskLevel.GREEN
+
+
+@pytest.mark.parametrize(
+    "text",
+    (
+        "Restrictions do not apply to USD1, but USD1 withdrawals are suspended",
+        "USD1 deposits are not restricted, but withdrawals are suspended",
+        "USD1 is not frozen, but withdrawals are suspended",
+    ),
+)
+def test_negated_action_does_not_hide_later_real_risk(text: str) -> None:
+    assert classify_official_text(text).level is RiskLevel.YELLOW
+
+
+@pytest.mark.parametrize(
+    "text",
+    (
+        "USD1 withdrawals are suspended and exceptions do not apply",
+        "USD1 restrictions are active and the waiver is not applicable",
+    ),
+)
+def test_unrelated_non_applicable_subject_does_not_hide_risk(text: str) -> None:
+    assert classify_official_text(text).level is RiskLevel.YELLOW

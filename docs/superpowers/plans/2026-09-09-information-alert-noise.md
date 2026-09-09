@@ -56,3 +56,21 @@
 - [x] Run the complete offline test suite, `python -m compileall -q usd1_monitor tests`, `python -m pip check`, and `git diff --check`.
 - [x] Inspect `git diff --stat`, `git diff`, and `git status --short`; ensure no unrelated files changed.
 - [x] Mark this plan complete and commit with a Chinese commit message.
+
+### Task 5: Address independent review findings
+
+**Files:**
+- Modify: `usd1_monitor/collectors/announcements.py`
+- Modify: `usd1_monitor/engine/information_rules.py`
+- Modify: `usd1_monitor/scheduler.py`
+- Test: `tests/test_official_sources.py`
+- Test: `tests/test_information_rules.py`
+- Test: `tests/test_information_integration.py`
+
+- [x] Add failing tests for a 24-hour-old `binance_scan` item becoming a directly adverse USD1 item, explicit English negations, and separate HTML blocks that must not cross-match.
+- [x] Verify all review regression tests fail for the first implementation.
+- [x] Preserve block-level body sections as metadata without changing the existing body hash input.
+- [x] Use word-form risk patterns with bounded negation detection, classify title/body sections independently, and exempt promoted `binance_scan` items from the historical `NEW` cutoff.
+- [x] Exclude failed `binance_scan` placeholders from the promotion exemption, bind negation to the adverse action, and keep each HTML table row as one classification section.
+- [x] Re-run the focused review regression tests and the complete information-source test group.
+- [x] Run the complete offline suite after review fixes and obtain a final independent read-only review with no Critical or Important findings.
