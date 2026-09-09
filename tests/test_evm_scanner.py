@@ -26,7 +26,8 @@ async def test_scanner_uses_safe_head_and_overlap_without_advancing_cursor(stora
     fake_rpc = FakeRpc()
     await storage.set_scan_cursor("ethereum", 100)
     fake_rpc.result("eth_blockNumber", "0x82")
-    fake_rpc.result("eth_getLogs", [])
+    for _ in range(5):
+        fake_rpc.result("eth_getLogs", [])
     scanner = EvmScanner(
         "ethereum",
         fake_rpc,
@@ -38,9 +39,9 @@ async def test_scanner_uses_safe_head_and_overlap_without_advancing_cursor(stora
 
     result = await scanner.scan_once()
 
-    request = fake_rpc.calls_for("eth_getLogs")[0][0]
-    assert request["fromBlock"] == hex(81)
-    assert request["toBlock"] == hex(127)
+    requests = [params[0] for params in fake_rpc.calls_for("eth_getLogs")]
+    assert requests[0]["fromBlock"] == hex(81)
+    assert requests[-1]["toBlock"] == hex(127)
     assert await storage.get_scan_cursor("ethereum") == 100
     assert result.safe_head == 127
 
@@ -50,7 +51,8 @@ async def test_scanner_caps_each_catch_up_cycle_to_one_batch(storage) -> None:
     fake_rpc = FakeRpc()
     await storage.set_scan_cursor("ethereum", 100)
     fake_rpc.result("eth_blockNumber", hex(10_000))
-    fake_rpc.result("eth_getLogs", [])
+    for _ in range(10):
+        fake_rpc.result("eth_getLogs", [])
     scanner = EvmScanner(
         "ethereum",
         fake_rpc,
@@ -62,10 +64,40 @@ async def test_scanner_caps_each_catch_up_cycle_to_one_batch(storage) -> None:
 
     result = await scanner.scan_once()
 
-    request = fake_rpc.calls_for("eth_getLogs")[0][0]
-    assert request["fromBlock"] == hex(81)
-    assert request["toBlock"] == hex(180)
+    requests = [params[0] for params in fake_rpc.calls_for("eth_getLogs")]
+    assert requests[0]["fromBlock"] == hex(81)
+    assert requests[-1]["toBlock"] == hex(180)
     assert result.safe_head == 9_997
+    assert result.cursor == 180
+
+
+@pytest.mark.asyncio
+async def test_scanner_chunks_log_queries_without_reducing_cycle_progress(
+    storage,
+) -> None:
+    fake_rpc = FakeRpc()
+    await storage.set_scan_cursor("ethereum", 100)
+    fake_rpc.result("eth_blockNumber", hex(10_000))
+    for _ in range(10):
+        fake_rpc.result("eth_getLogs", [])
+    scanner = EvmScanner(
+        "ethereum",
+        fake_rpc,
+        storage,
+        confirmation_depth=3,
+        overlap_blocks=20,
+        batch_blocks=100,
+    )
+
+    result = await scanner.scan_once()
+
+    requests = [params[0] for params in fake_rpc.calls_for("eth_getLogs")]
+    assert [
+        (request["fromBlock"], request["toBlock"]) for request in requests
+    ] == [
+        (hex(start), hex(start + 9))
+        for start in range(81, 181, 10)
+    ]
     assert result.cursor == 180
 
 
@@ -105,6 +137,7 @@ async def test_scanner_does_not_write_events_or_cursor(storage) -> None:
             }
         ],
     )
+    fake_rpc.result("eth_getLogs", [])
     scanner = EvmScanner(
         "ethereum",
         fake_rpc,
@@ -133,8 +166,10 @@ async def test_replayed_log_is_idempotent(storage) -> None:
     fake_rpc = FakeRpc()
     fake_rpc.result("eth_blockNumber", "0x20")
     fake_rpc.result("eth_getLogs", [raw_log])
+    fake_rpc.result("eth_getLogs", [])
     fake_rpc.result("eth_blockNumber", "0x20")
     fake_rpc.result("eth_getLogs", [raw_log])
+    fake_rpc.result("eth_getLogs", [])
     scanner = EvmScanner(
         "ethereum",
         fake_rpc,

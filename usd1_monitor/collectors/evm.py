@@ -22,6 +22,7 @@ ADMIN_SLOT = hex(int.from_bytes(keccak(text="eip1967.proxy.admin"), "big") - 1)
 OWNER_SELECTOR = "0x8da5cb5b"
 PAUSED_SELECTOR = "0x5c975abb"
 FROZEN_SELECTOR = "0xd0516650"
+EVM_LOG_QUERY_CHUNK_BLOCKS = 10
 
 
 class RpcClient(Protocol):
@@ -113,8 +114,10 @@ class EvmScanner:
         start, end = current_range
         end = min(end, start + self._batch_blocks - 1)
         candidate_events: list[ChainEvent] = []
-        for batch_start in range(start, end + 1, self._batch_blocks):
-            batch_end = min(end, batch_start + self._batch_blocks - 1)
+        for batch_start in range(start, end + 1, EVM_LOG_QUERY_CHUNK_BLOCKS):
+            batch_end = min(
+                end, batch_start + EVM_LOG_QUERY_CHUNK_BLOCKS - 1
+            )
             raw_logs = await self._rpc.call(
                 "eth_getLogs",
                 [
