@@ -237,6 +237,16 @@ def test_health_alert_is_distinct_from_business_risk() -> None:
     assert "health.por" not in content
 
 
+def test_single_health_recovery_does_not_hide_other_health_failure() -> None:
+    content = format_transitions(
+        [transition("health.por", RiskLevel.YELLOW, RiskLevel.GREEN)],
+        overall_level=RiskLevel.RED,
+    )
+
+    assert content.startswith("🔴 USD1 监控异常")
+    assert "🟢 USD1 监控已恢复" not in content
+
+
 @pytest.mark.parametrize(
     ("rule_id", "evidence", "expected"),
     (
@@ -250,7 +260,17 @@ def test_health_alert_is_distinct_from_business_risk() -> None:
         (
             "event.information.binance.notice.hash",
             {"threshold": "official risk phrase: USD1 withdrawals are suspended"},
-            "官方公告提到：USD1 withdrawals are suspended",
+            "Binance 官方公告提到：USD1 withdrawals are suspended",
+        ),
+        (
+            "event.information.bitgo.attestation_fields.2026-07:report",
+            {"current": ["auditor"]},
+            "BitGo 鉴证报告的关键信息发生变化",
+        ),
+        (
+            "health.supply_bsc",
+            {"current": 3},
+            "BNB Chain 供应量数据连续 3 次未能获取",
         ),
     ),
 )

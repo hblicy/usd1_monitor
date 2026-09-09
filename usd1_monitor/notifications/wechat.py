@@ -31,6 +31,10 @@ COLLECTOR_LABELS = {
     "por": "储备证明",
     "native_supply": "链上供应量",
     "defillama_supply": "全链供应量估算",
+    "supply_ethereum": "Ethereum 供应量",
+    "supply_bsc": "BNB Chain 供应量",
+    "supply_defillama": "DefiLlama 全链供应量",
+    "supply": "供应量",
     "reserve_supply": "储备与供应量",
     "information": "官方信息",
     "official_binance": "Binance 官方公告",
@@ -62,6 +66,12 @@ NOT_MONITORED_LABELS = {
     "defi_liquidations": "DeFi 清算",
     "web_dashboard": "网页仪表盘",
     "full_multichain_supply_reconciliation": "完整多链供应量核对",
+}
+OFFICIAL_SOURCE_LABELS = {
+    "binance": "Binance",
+    "bitgo": "BitGo",
+    "wlfi": "WLFI",
+    "occ": "OCC",
 }
 
 
@@ -253,14 +263,21 @@ def _human_summary(transition: RiskTransition) -> tuple[str, list[str]]:
             details.append(f"下降比例：{_format_number(current * 100)}%")
         return summary, details
 
-    if rule_id.startswith("event.information."):
+    if rule_id.startswith("event.information.bitgo.attestation_fields."):
         if recovered:
-            return "官方信息风险已解除", details
+            return "BitGo 鉴证报告的关键信息已确认稳定", details
+        return "BitGo 鉴证报告的关键信息发生变化", details
+
+    if rule_id.startswith("event.information."):
+        source_name = rule_id.split(".", 3)[2]
+        source_label = OFFICIAL_SOURCE_LABELS.get(source_name, "官方")
+        if recovered:
+            return f"{source_label} 官方信息风险已解除", details
         threshold = str(evidence.get("threshold", ""))
         phrase = threshold.removeprefix("official risk phrase: ").strip()
         if phrase:
-            return f"官方公告提到：{phrase}", details
-        return "官方信息出现需要关注的变化", details
+            return f"{source_label} 官方公告提到：{phrase}", details
+        return f"{source_label} 官方信息出现需要关注的变化", details
 
     if rule_id.startswith("information.attestation"):
         if recovered:
@@ -350,11 +367,15 @@ def _event_lines(
     transitions: list[RiskTransition], *, timezone_name: str
 ) -> list[str]:
     lines: list[str] = []
+    seen_lines: set[str] = set()
     sources: list[str] = []
     for transition in transitions:
         summary, details = _human_summary(transition)
-        lines.append(f"发生了什么：{summary}")
-        lines.extend(details)
+        event_lines = [f"发生了什么：{summary}", *details]
+        for line in event_lines:
+            if line not in seen_lines:
+                lines.append(line)
+                seen_lines.add(line)
         sources.extend(_source_urls(transition.evidence))
 
     raw_time = transitions[0].evidence.get("data_time", transitions[0].changed_at)
@@ -388,11 +409,8 @@ def format_transitions(
 
     transition_level = max(item.current for item in items)
     health_only = all(item.rule_id.startswith("health.") for item in items)
-    if health_only:
-        display_level = transition_level
-    else:
-        overall = overall_level if overall_level is not None else transition_level
-        display_level = max(overall, transition_level)
+    overall = overall_level if overall_level is not None else transition_level
+    display_level = max(overall, transition_level)
     recovered = (
         display_level is RiskLevel.GREEN
         and all(item.current is RiskLevel.GREEN for item in items)

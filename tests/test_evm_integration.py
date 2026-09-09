@@ -433,6 +433,7 @@ async def test_upgrade_event_and_snapshot_changes_share_one_alert(
 
     assert len(fake_notifier.messages) == 1
     assert "USD1 实现合约发生变化" in fake_notifier.messages[0]
+    assert fake_notifier.messages[0].count("发生了什么：Ethereum USD1 实现合约发生变化") == 1
     assert "IMPLEMENTATION_CHANGED" not in fake_notifier.messages[0]
     assert "USD1 合约代码发生变化" in fake_notifier.messages[0]
     assert "CODE_HASH_CHANGED" not in fake_notifier.messages[0]
