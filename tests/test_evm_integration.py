@@ -1072,3 +1072,57 @@ async def test_composite_check_times_out_stuck_component(storage) -> None:
     assert "TimeoutError" in result.errors[0]
     health = await storage.get_collector_health("scheduler_market")
     assert health is not None and health.consecutive_failures == 1
+
+
+@pytest.mark.asyncio
+async def test_composite_check_does_not_cancel_bounded_evm_catchup(storage) -> None:
+    class SlowEvm:
+        chain = "bsc"
+
+        async def check_once(self, *, deliver=True):
+            await __import__("asyncio").sleep(0.03)
+            return CheckResult(True, (), ("bsc catch-up completed",))
+
+    monitor = Usd1Monitor(
+        FakeMarketMonitor(),
+        [SlowEvm()],
+        storage,
+        None,
+        check_timeout_seconds=0.01,
+    )
+
+    result = await monitor.check_once(deliver=False)
+
+    assert result.success is True
+    assert "bsc catch-up completed" in result.details
+    health = await storage.get_collector_health("scheduler_evm_bsc")
+    assert health is not None and health.consecutive_failures == 0
+
+
+@pytest.mark.asyncio
+async def test_run_does_not_cancel_bounded_evm_catchup(storage) -> None:
+    class SlowStoppingEvm:
+        chain = "bsc"
+        monitor = None
+        completed = False
+
+        async def check_once(self, *, deliver=True):
+            await __import__("asyncio").sleep(0.03)
+            self.completed = True
+            self.monitor.stop()
+            return CheckResult(True, (), ("bsc catch-up completed",))
+
+    evm = SlowStoppingEvm()
+    monitor = Usd1Monitor(
+        FakeMarketMonitor(),
+        [evm],
+        storage,
+        None,
+        interval_seconds=60,
+        check_timeout_seconds=0.01,
+    )
+    evm.monitor = monitor
+
+    await __import__("asyncio").wait_for(monitor.run(), timeout=0.2)
+
+    assert evm.completed is True

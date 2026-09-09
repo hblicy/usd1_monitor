@@ -1078,9 +1078,13 @@ class Usd1Monitor:
         check: Callable[[], Awaitable[CheckResult]],
     ) -> CheckResult:
         try:
-            result = await asyncio.wait_for(
-                check(), timeout=self._check_timeout_seconds
-            )
+            if name.startswith("evm_"):
+                # Cancelling a bounded catch-up cycle discards its cursor progress.
+                result = await check()
+            else:
+                result = await asyncio.wait_for(
+                    check(), timeout=self._check_timeout_seconds
+                )
         except TimeoutError:
             error = (
                 f"{name}: TimeoutError: exceeded "
