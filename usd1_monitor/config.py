@@ -34,6 +34,7 @@ class HttpConfig(StrictModel):
     timeout_seconds: float = Field(default=10, gt=0)
     retries: int = Field(default=2, ge=0, le=5)
     max_response_bytes: int = Field(default=20_000_000, gt=0)
+    rpc_throughput_cups: float = Field(default=270, gt=0)
 
 
 class MarketConfig(StrictModel):

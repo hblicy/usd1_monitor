@@ -19,6 +19,7 @@ http:
   timeout_seconds: 10
   retries: 2
   max_response_bytes: 20000000
+  rpc_throughput_cups: 270
 logging:
   path: /var/log/usd1-monitor/monitor.log
   max_bytes: 10000000

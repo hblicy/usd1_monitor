@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
+from collections.abc import Awaitable, Callable
 from typing import Any
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
@@ -83,11 +85,70 @@ def _same_origin(left: str, right: str) -> bool:
     )
 
 
+_RPC_THROUGHPUT_CUPS = {
+    "eth_chainId": 5,
+    "eth_blockNumber": 10,
+    "eth_getLogs": 60,
+    "eth_call": 26,
+    "eth_getBlockByNumber": 20,
+    "eth_getStorageAt": 20,
+    "eth_getCode": 20,
+    "eth_getTransactionReceipt": 20,
+}
+
+
+def _rpc_throughput_cost(payload: dict[str, Any]) -> int:
+    if payload.get("jsonrpc") != "2.0":
+        return 0
+    method = payload.get("method")
+    return _RPC_THROUGHPUT_CUPS.get(method, 0) if isinstance(method, str) else 0
+
+
+class _RpcThroughputLimiter:
+    def __init__(
+        self,
+        cups: float,
+        *,
+        window_seconds: float = 10.0,
+        clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    ) -> None:
+        self._rate = float(cups)
+        self._capacity = max(
+            self._rate * window_seconds,
+            float(max(_RPC_THROUGHPUT_CUPS.values())),
+        )
+        self._tokens = self._capacity
+        self._updated_at = clock()
+        self._clock = clock
+        self._sleep = sleep
+        self._lock = asyncio.Lock()
+
+    async def acquire(self, cost: int) -> None:
+        while True:
+            async with self._lock:
+                now = self._clock()
+                elapsed = max(0.0, now - self._updated_at)
+                self._tokens = min(
+                    self._capacity,
+                    self._tokens + elapsed * self._rate,
+                )
+                self._updated_at = now
+                if self._tokens >= cost - 1e-9:
+                    self._tokens = max(0.0, self._tokens - cost)
+                    return
+                delay = (cost - self._tokens) / self._rate
+            await self._sleep(delay)
+
+
 class AsyncHttpClient:
     def __init__(self, config: HttpConfig) -> None:
         self._timeout = aiohttp.ClientTimeout(total=config.timeout_seconds)
         self._retries = config.retries
         self._max_response_bytes = config.max_response_bytes
+        self._rpc_throughput_limiter = _RpcThroughputLimiter(
+            config.rpc_throughput_cups
+        )
         self._session: aiohttp.ClientSession | None = None
 
     async def __aenter__(self) -> "AsyncHttpClient":
@@ -111,7 +172,12 @@ class AsyncHttpClient:
         return await self._request_json("GET", url, params=params)
 
     async def post_json(self, url: str, payload: dict[str, Any]) -> object:
-        return await self._request_json("POST", url, json=payload)
+        return await self._request_json(
+            "POST",
+            url,
+            rpc_cost=_rpc_throughput_cost(payload),
+            json=payload,
+        )
 
     async def get_text(self, url: str) -> str:
         body = await self._request_bytes(url)
@@ -167,12 +233,21 @@ class AsyncHttpClient:
         assert last_error is not None
         raise HttpRequestError("GET", url, attempts, last_error) from None
 
-    async def _request_json(self, method: str, url: str, **kwargs: object) -> object:
+    async def _request_json(
+        self,
+        method: str,
+        url: str,
+        *,
+        rpc_cost: int = 0,
+        **kwargs: object,
+    ) -> object:
         await self.open()
         assert self._session is not None
         last_error: Exception | None = None
         attempts = self._retries + 1
         for attempt in range(1, attempts + 1):
+            if rpc_cost:
+                await self._rpc_throughput_limiter.acquire(rpc_cost)
             try:
                 async with self._session.request(
                     method, url, allow_redirects=False, **kwargs
