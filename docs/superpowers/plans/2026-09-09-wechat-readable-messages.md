@@ -4,7 +4,7 @@
 
 **Goal:** 将企业微信启动、风险和恢复通知改成不含 Markdown 与内部标识的简明中文纯文本。
 
-**Architecture:** 只修改通知展示层。`wechat.py` 负责把既有 `RiskTransition` 证据映射为中文状态、摘要、关键数据、时间、来源和建议；`scheduler.py` 复用同一启动消息格式化函数。风险判断、证据存储、队列去重和发送机制保持不变。
+**Architecture:** `wechat.py` 负责把既有 `RiskTransition` 证据映射为中文状态、摘要、关键数据、时间、来源和建议；`scheduler.py` 复用同一启动消息格式化函数。`health.py` 在原有健康判定后增加 60 秒恢复稳定期，使用现有 `last_failure_at` 和先前风险状态，不迁移数据库。USD1 业务风险判断、证据存储、队列去重和发送机制保持不变。
 
 **Tech Stack:** Python 3.12、dataclass 模型、pytest、企业微信 text webhook
 
@@ -201,6 +201,8 @@ FACT_LABELS = {
 - `health.*` 使用 `COLLECTOR_LABELS`，不向微信输出 `last_error` 原文；错误细节保留在日志和数据库。
 - 未知规则使用通用摘要，不回显规则编号。
 
+当本批转换全部属于 `health.*` 时，异常标题使用“🟡/🔴 USD1 监控异常”，恢复标题使用“🟢 USD1 监控已恢复”；不得使用 USD1 业务风险标题。
+
 展示等级取“当前整体等级”和“本批事件等级”中的较高值，避免短时事件在整体仍为绿色时显示成正常。只有整体为绿色、且本批转换全部恢复为绿色时，标题才使用“已恢复正常”。
 
 金额、价格、比率和字典使用短格式；禁止直接输出大型 `exit_capacity` 字典。多条同原因转换合并为一个事件段；不同原因使用 `事件 1`、`事件 2`，不得输出 `cause_id`。
@@ -232,7 +234,115 @@ git add tests/test_wechat.py tests/test_evm_integration.py tests/test_market_int
 git commit -m "完善微信风险中文摘要"
 ```
 
-### Task 3: 简化启动通知
+### Task 3: 防止采集健康状态黄绿抖动
+
+**Files:**
+- Modify: `tests/test_health.py`
+- Modify: `usd1_monitor/engine/health.py`
+- Modify: `usd1_monitor/scheduler.py`
+
+- [ ] **Step 1: 写 60 秒恢复稳定期的失败测试**
+
+在 `tests/test_health.py` 从 `usd1_monitor.engine.health` 导入 `evaluate_health_with_recovery`，增加：
+
+```python
+def test_warned_collector_does_not_recover_on_first_success() -> None:
+    health = CollectorHealth(
+        "scheduler_evm_bsc",
+        0,
+        NOW,
+        None,
+        last_failure_at=NOW - timedelta(seconds=20),
+    )
+
+    assert evaluate_health_with_recovery(
+        health,
+        NOW,
+        critical=True,
+        previous_level=RiskLevel.YELLOW,
+    ) is RiskLevel.YELLOW
+
+
+def test_warned_collector_recovers_after_sixty_stable_seconds() -> None:
+    health = CollectorHealth(
+        "scheduler_evm_bsc",
+        0,
+        NOW,
+        None,
+        last_failure_at=NOW - timedelta(seconds=60),
+    )
+
+    assert evaluate_health_with_recovery(
+        health,
+        NOW,
+        critical=True,
+        previous_level=RiskLevel.YELLOW,
+    ) is RiskLevel.GREEN
+
+
+def test_unwarned_collector_stays_green_during_recovery_window() -> None:
+    health = CollectorHealth(
+        "scheduler_evm_bsc",
+        0,
+        NOW,
+        None,
+        last_failure_at=NOW - timedelta(seconds=20),
+    )
+
+    assert evaluate_health_with_recovery(
+        health,
+        NOW,
+        critical=True,
+        previous_level=RiskLevel.GREEN,
+    ) is RiskLevel.GREEN
+```
+
+- [ ] **Step 2: 运行测试并确认失败**
+
+Run: `.venv\Scripts\python.exe -m pytest tests/test_health.py -q`
+
+Expected: FAIL；`evaluate_health_with_recovery` 尚不存在。
+
+- [ ] **Step 3: 实现健康恢复稳定期**
+
+在 `usd1_monitor/engine/health.py` 增加：
+
+```python
+def evaluate_health_with_recovery(
+    health: CollectorHealth,
+    now: datetime,
+    *,
+    critical: bool,
+    previous_level: RiskLevel,
+    recovery_seconds: int = 60,
+) -> RiskLevel:
+    current = evaluate_health(health, now, critical=critical)
+    if (
+        current is RiskLevel.GREEN
+        and previous_level is not RiskLevel.GREEN
+        and health.last_failure_at is not None
+        and (now - health.last_failure_at).total_seconds() < recovery_seconds
+    ):
+        return previous_level
+    return current
+```
+
+在 `scheduler._record_health()` 中先读取 `health.{collector_id}` 的先前状态，再调用 `evaluate_health_with_recovery()`。如果没有先前状态，传入 GREEN。保留企业微信发送失败队列强制 YELLOW 的现有特殊逻辑。
+
+- [ ] **Step 4: 运行健康与调度器直接测试**
+
+Run: `.venv\Scripts\python.exe -m pytest tests/test_health.py tests/test_evm_integration.py tests/test_information_integration.py tests/test_reserve_supply_integration.py -q`
+
+Expected: PASS。
+
+- [ ] **Step 5: 提交**
+
+```bash
+git add tests/test_health.py usd1_monitor/engine/health.py usd1_monitor/scheduler.py
+git commit -m "增加监控健康恢复稳定期"
+```
+
+### Task 4: 简化启动通知
 
 **Files:**
 - Modify: `tests/test_market_integration.py`
@@ -263,21 +373,9 @@ Expected: FAIL；当前启动消息仍使用内部采集器名称。
 
 - [ ] **Step 3: 添加并复用启动消息格式化函数**
 
-在 `wechat.py` 增加：
+在 `wechat.py` 增加未覆盖能力的中文映射，以及：
 
 ```python
-NOT_MONITORED_LABELS = {
-    "private_exchange_account": "私人交易所账户",
-    "active_conversion_probe": "主动兑换测试",
-    "tron_solana_aptos_tempo_bridges": "部分跨链桥",
-    "binance_wallet_concentration": "Binance 钱包集中度",
-    "social_media_sentiment": "社交媒体情绪",
-    "defi_liquidations": "DeFi 清算",
-    "web_dashboard": "网页仪表盘",
-    "full_multichain_supply_reconciliation": "完整多链供应量对账",
-}
-
-
 def format_startup_message(
     monitored: Iterable[str], not_monitored: Iterable[str]
 ) -> str:
@@ -293,7 +391,7 @@ def format_startup_message(
     )
 ```
 
-两个 `send_startup_once()` 都调用该函数。市场监控传入 `("价格", "流动性", "交易状态")`；完整调度器根据实际启用组件追加“Ethereum 链上合约”“BNB Chain 链上合约”“储备与供应量”“官方公告”。不改发送频率、限速和失败健康记录。
+两个 `send_startup_once()` 都调用该函数。市场监控传入价格、流动性和交易状态；完整调度器根据实际启用组件追加 Ethereum 链上合约、BNB Chain 链上合约、储备与供应量、官方公告。不改发送频率、限速和失败健康记录。
 
 - [ ] **Step 4: 运行启动和通知测试**
 
@@ -308,7 +406,7 @@ git add tests/test_market_integration.py tests/test_evm_integration.py usd1_moni
 git commit -m "简化微信启动通知"
 ```
 
-### Task 4: 文档与完整验收
+### Task 5: 文档与完整验收
 
 **Files:**
 - Modify: `README.md`
@@ -316,7 +414,7 @@ git commit -m "简化微信启动通知"
 
 - [ ] **Step 1: 更新 README 通知语义**
 
-在现有通知语义段明确：企业微信只发送纯文本；状态显示为正常、注意、危险；消息不含内部规则编号和原因哈希；详细诊断仍在日志与数据库中。
+在现有通知语义段明确：企业微信只发送纯文本；状态显示为正常、注意、危险；健康消息显示监控异常或监控已恢复；消息不含内部规则编号和原因哈希；健康告警恢复需要 60 秒稳定期；详细诊断仍在日志与数据库中。
 
 - [ ] **Step 2: 运行完整验证**
 
