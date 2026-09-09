@@ -47,6 +47,22 @@ def test_http_error_redacts_userinfo_path_token_and_cause_url() -> None:
     assert "secret-token" not in rendered
 
 
+def test_retried_http_response_error_keeps_safe_status_metadata() -> None:
+    secret_url = "https://rpc.example/v2/secret-token"
+    error = HttpRequestError(
+        "POST",
+        secret_url,
+        3,
+        HttpResponseError("POST", secret_url, 429, 429),
+    )
+
+    assert str(error) == (
+        "POST https://rpc.example failed after 3 attempt(s): "
+        "HttpResponseError status=429 code=429"
+    )
+    assert "secret-token" not in str(error)
+
+
 @pytest.mark.asyncio
 async def test_full_http_traceback_does_not_include_secret_url() -> None:
     secret_url = "https://user:password@rpc.example/v2/secret-token?key=query-secret"
