@@ -211,5 +211,7 @@ async def test_state_engine_groups_same_cause_into_one_pending_alert(storage) ->
     assert len(transitions) == 2
     assert await storage.count_alert_deliveries() == 1
     pending = await storage.pending_alerts()
-    assert "market.price" in pending[0].content
-    assert "market.liquidity" in pending[0].content
+    assert "USD1 价格低于预警线" in pending[0].content
+    assert "USD1 市场流动性不足" in pending[0].content
+    assert "market.price" not in pending[0].content
+    assert "market.liquidity" not in pending[0].content

@@ -16,7 +16,7 @@
 - Modify: `tests/test_wechat.py`
 - Modify: `usd1_monitor/notifications/wechat.py`
 
-- [ ] **Step 1: 写纯文本基础帮助函数的失败测试**
+- [x] **Step 1: 写纯文本基础帮助函数的失败测试**
 
 在 `tests/test_wechat.py` 增加：
 
@@ -41,13 +41,13 @@ def test_plain_text_helpers_render_chinese_status_time_and_sources() -> None:
     assert _source_urls({}) == []
 ```
 
-- [ ] **Step 2: 运行测试并确认失败**
+- [x] **Step 2: 运行测试并确认失败**
 
 Run: `.venv\Scripts\python.exe -m pytest tests/test_wechat.py::test_plain_text_helpers_render_chinese_status_time_and_sources -q`
 
 Expected: FAIL；基础帮助函数尚不存在。
 
-- [ ] **Step 3: 在 `wechat.py` 增加纯文本基础格式化函数**
+- [x] **Step 3: 在 `wechat.py` 增加纯文本基础格式化函数**
 
 保留 `WeChatNotifier.send_text()` 的 `msgtype=text` payload。加入以下私有映射和帮助函数：
 
@@ -86,13 +86,13 @@ def _advice(level: RiskLevel, health_only: bool) -> str:
 
 本任务只增加这些无副作用帮助函数，不切换 `format_transitions()`，确保每次提交都保持现有测试通过。`_level_heading(level, recovered)` 使用 `LEVEL_LABELS`，恢复时返回 `🟢 USD1 已恢复正常`。
 
-- [ ] **Step 4: 运行核心格式测试**
+- [x] **Step 4: 运行核心格式测试**
 
 Run: `.venv\Scripts\python.exe -m pytest tests/test_wechat.py -q`
 
 Expected: PASS；本任务尚未切换公开消息格式，原有测试也继续通过。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add tests/test_wechat.py usd1_monitor/notifications/wechat.py
@@ -109,7 +109,7 @@ git commit -m "建立微信纯文本通知格式"
 - Test: `tests/test_reserve_supply_integration.py`
 - Test: `tests/test_information_integration.py`
 
-- [ ] **Step 1: 写各类通知的失败测试**
+- [x] **Step 1: 写各类通知的失败测试**
 
 覆盖市场、链上、储备供应、官方公告、健康异常和恢复：
 
@@ -153,13 +153,13 @@ def test_existing_rule_types_have_human_summary(rule_id, evidence, expected) -> 
 
 为链上事件增加独立测试，断言显示 `Ethereum`、中文事件名、必要地址或金额，但不显示 `fact_type=`、`event_key=`、`selector=` 或原因哈希。为未知规则增加测试，断言输出“监控发现异常，请打开信息来源并人工确认”，且不回显未知 `rule_id`。
 
-- [ ] **Step 2: 运行新增测试并确认失败**
+- [x] **Step 2: 运行新增测试并确认失败**
 
 Run: `.venv\Scripts\python.exe -m pytest tests/test_wechat.py -q`
 
 Expected: FAIL；尚无风险类型中文映射。
 
-- [ ] **Step 3: 实现固定中文摘要映射**
+- [x] **Step 3: 实现固定中文摘要映射**
 
 在 `wechat.py` 增加固定映射，不调用 AI：
 
@@ -207,7 +207,7 @@ FACT_LABELS = {
 
 金额、价格、比率和字典使用短格式；禁止直接输出大型 `exit_capacity` 字典。多条同原因转换合并为一个事件段；不同原因使用 `事件 1`、`事件 2`，不得输出 `cause_id`。
 
-- [ ] **Step 4: 更新受影响的集成测试断言**
+- [x] **Step 4: 更新受影响的集成测试断言**
 
 将依赖旧格式的断言改为外部行为断言，例如：
 
@@ -221,13 +221,13 @@ assert "fact_type=" not in message
 
 不要修改风险等级、触发次数或 pending alert 数量断言。
 
-- [ ] **Step 5: 运行通知及直接集成测试**
+- [x] **Step 5: 运行通知及直接集成测试**
 
 Run: `.venv\Scripts\python.exe -m pytest tests/test_wechat.py tests/test_evm_integration.py tests/test_market_integration.py tests/test_reserve_supply_integration.py tests/test_information_integration.py -q`
 
 Expected: PASS。
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add tests/test_wechat.py tests/test_evm_integration.py tests/test_market_integration.py tests/test_reserve_supply_integration.py tests/test_information_integration.py usd1_monitor/notifications/wechat.py
@@ -241,7 +241,7 @@ git commit -m "完善微信风险中文摘要"
 - Modify: `usd1_monitor/engine/health.py`
 - Modify: `usd1_monitor/scheduler.py`
 
-- [ ] **Step 1: 写 60 秒恢复稳定期的失败测试**
+- [x] **Step 1: 写 60 秒恢复稳定期的失败测试**
 
 在 `tests/test_health.py` 从 `usd1_monitor.engine.health` 导入 `evaluate_health_with_recovery`，增加：
 
@@ -297,13 +297,13 @@ def test_unwarned_collector_stays_green_during_recovery_window() -> None:
     ) is RiskLevel.GREEN
 ```
 
-- [ ] **Step 2: 运行测试并确认失败**
+- [x] **Step 2: 运行测试并确认失败**
 
 Run: `.venv\Scripts\python.exe -m pytest tests/test_health.py -q`
 
 Expected: FAIL；`evaluate_health_with_recovery` 尚不存在。
 
-- [ ] **Step 3: 实现健康恢复稳定期**
+- [x] **Step 3: 实现健康恢复稳定期**
 
 在 `usd1_monitor/engine/health.py` 增加：
 
@@ -329,13 +329,13 @@ def evaluate_health_with_recovery(
 
 在 `scheduler._record_health()` 中先读取 `health.{collector_id}` 的先前状态，再调用 `evaluate_health_with_recovery()`。如果没有先前状态，传入 GREEN。保留企业微信发送失败队列强制 YELLOW 的现有特殊逻辑。
 
-- [ ] **Step 4: 运行健康与调度器直接测试**
+- [x] **Step 4: 运行健康与调度器直接测试**
 
 Run: `.venv\Scripts\python.exe -m pytest tests/test_health.py tests/test_evm_integration.py tests/test_information_integration.py tests/test_reserve_supply_integration.py -q`
 
 Expected: PASS。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add tests/test_health.py usd1_monitor/engine/health.py usd1_monitor/scheduler.py
@@ -350,7 +350,7 @@ git commit -m "增加监控健康恢复稳定期"
 - Modify: `usd1_monitor/notifications/wechat.py`
 - Modify: `usd1_monitor/scheduler.py`
 
-- [ ] **Step 1: 写两条启动消息失败测试**
+- [x] **Step 1: 写两条启动消息失败测试**
 
 分别覆盖只启用市场监控和启用完整调度器：
 
@@ -365,13 +365,13 @@ for hidden in ("enabled_collectors", "NOT_MONITORED", "binance_market", "evm_bsc
 
 同时断言 notifier 收到的 payload 仍为 `{"msgtype": "text", ...}`。
 
-- [ ] **Step 2: 运行测试并确认失败**
+- [x] **Step 2: 运行测试并确认失败**
 
 Run: `.venv\Scripts\python.exe -m pytest tests/test_market_integration.py tests/test_evm_integration.py -q`
 
 Expected: FAIL；当前启动消息仍使用内部采集器名称。
 
-- [ ] **Step 3: 添加并复用启动消息格式化函数**
+- [x] **Step 3: 添加并复用启动消息格式化函数**
 
 在 `wechat.py` 增加未覆盖能力的中文映射，以及：
 
@@ -393,13 +393,13 @@ def format_startup_message(
 
 两个 `send_startup_once()` 都调用该函数。市场监控传入价格、流动性和交易状态；完整调度器根据实际启用组件追加 Ethereum 链上合约、BNB Chain 链上合约、储备与供应量、官方公告。不改发送频率、限速和失败健康记录。
 
-- [ ] **Step 4: 运行启动和通知测试**
+- [x] **Step 4: 运行启动和通知测试**
 
 Run: `.venv\Scripts\python.exe -m pytest tests/test_market_integration.py tests/test_evm_integration.py tests/test_wechat.py -q`
 
 Expected: PASS。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add tests/test_market_integration.py tests/test_evm_integration.py usd1_monitor/notifications/wechat.py usd1_monitor/scheduler.py
@@ -412,11 +412,11 @@ git commit -m "简化微信启动通知"
 - Modify: `README.md`
 - Modify: `docs/superpowers/plans/2026-09-09-wechat-readable-messages.md`
 
-- [ ] **Step 1: 更新 README 通知语义**
+- [x] **Step 1: 更新 README 通知语义**
 
 在现有通知语义段明确：企业微信只发送纯文本；状态显示为正常、注意、危险；健康消息显示监控异常或监控已恢复；消息不含内部规则编号和原因哈希；健康告警恢复需要 60 秒稳定期；详细诊断仍在日志与数据库中。
 
-- [ ] **Step 2: 运行完整验证**
+- [x] **Step 2: 运行完整验证**
 
 Run: `.venv\Scripts\python.exe -m pytest -q`
 
@@ -434,11 +434,11 @@ Run: `git diff --check`
 
 Expected: exit code 0，无空白错误。
 
-- [ ] **Step 3: 做范围自审**
+- [x] **Step 3: 做范围自审**
 
 检查 `git diff --stat`、`git diff` 和 `git status --short`。只允许出现设计中列出的通知、调度器、测试、README 和计划文件；确认未修改风险判断、阈值、数据库结构或 webhook 配置。
 
-- [ ] **Step 4: 提交最终文档状态**
+- [x] **Step 4: 提交最终文档状态**
 
 ```bash
 git add README.md docs/superpowers/plans/2026-09-09-wechat-readable-messages.md
