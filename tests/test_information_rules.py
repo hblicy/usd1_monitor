@@ -34,3 +34,33 @@ def test_unrelated_binance_item_is_green() -> None:
         classify_official_text("Binance lists an unrelated token").level
         is RiskLevel.GREEN
     )
+
+
+def test_wlfi_listing_boilerplate_is_not_usd1_risk() -> None:
+    result = classify_official_text(
+        "Binance will list World Liberty Financial (WLFI). "
+        "The project is launching the USD1 stablecoin and USD1 ecosystem. "
+        "Trading is unavailable in restricted countries."
+    )
+
+    assert result.level is RiskLevel.GREEN
+
+
+def test_usd1_earn_promotion_terms_are_not_usd1_risk() -> None:
+    result = classify_official_text(
+        "USD1 Flexible Products offer an 8.5% APR. "
+        "Users must observe regional restrictions. "
+        "Binance may suspend this Promotion."
+    )
+
+    assert result.level is RiskLevel.GREEN
+
+
+def test_direct_usd1_adverse_clause_is_returned_as_evidence() -> None:
+    result = classify_official_text(
+        "General service update. USD1 withdrawals are suspended immediately. "
+        "Binance reserves the right to amend this notice."
+    )
+
+    assert result.level is RiskLevel.YELLOW
+    assert result.evidence == "USD1 withdrawals are suspended immediately"

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import calendar
+import re
 from dataclasses import dataclass
 from datetime import date, timedelta
 
@@ -18,22 +19,13 @@ RISK_WORDS = (
     "delist",
     "suspend",
     "restrict",
-    "reserve",
-    "custody",
-    "custodian",
-    "charter",
     "investigation",
     "freeze",
-    "attestation",
     "下架",
     "暂停",
     "限制",
-    "储备",
-    "托管",
-    "牌照",
     "调查",
     "冻结",
-    "鉴证",
 )
 
 
@@ -64,9 +56,14 @@ def next_attestation_due_at(latest_report_month: str) -> date:
 
 def classify_official_text(value: str) -> InformationClassification:
     canonical = normalize_text(value)
-    lowered = canonical.casefold()
-    if not matches_usd1(canonical):
-        return InformationClassification(RiskLevel.GREEN, canonical)
-    if any(word in lowered for word in RISK_WORDS):
-        return InformationClassification(RiskLevel.YELLOW, canonical)
+    clauses = (
+        clause.strip()
+        for clause in re.split(r"[.!?;。！？；]+", canonical)
+    )
+    for clause in clauses:
+        if not clause or not matches_usd1(clause):
+            continue
+        lowered = clause.casefold()
+        if any(word in lowered for word in RISK_WORDS):
+            return InformationClassification(RiskLevel.YELLOW, clause)
     return InformationClassification(RiskLevel.GREEN, canonical)
