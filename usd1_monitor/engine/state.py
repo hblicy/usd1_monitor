@@ -16,13 +16,22 @@ class StateEngine:
         self._storage = storage
 
     async def apply(
-        self, evaluations: Iterable[RuleEvaluation], now: datetime
+        self,
+        evaluations: Iterable[RuleEvaluation],
+        now: datetime,
+        *,
+        enqueue_alerts: bool = True,
     ) -> list[RiskTransition]:
         connection = self._storage.connection
         async with self._storage.write_lock:
             await connection.execute("BEGIN IMMEDIATE")
             try:
-                transitions = await self.apply_uncommitted(evaluations, now)
+                if enqueue_alerts:
+                    transitions = await self.apply_uncommitted(evaluations, now)
+                else:
+                    transitions = await self.apply_uncommitted(
+                        evaluations, now, enqueue_alerts=False
+                    )
                 await connection.commit()
             except BaseException:
                 await connection.rollback()
@@ -30,7 +39,11 @@ class StateEngine:
         return transitions
 
     async def apply_uncommitted(
-        self, evaluations: Iterable[RuleEvaluation], now: datetime
+        self,
+        evaluations: Iterable[RuleEvaluation],
+        now: datetime,
+        *,
+        enqueue_alerts: bool = True,
     ) -> list[RiskTransition]:
         transitions: list[RiskTransition] = []
         for evaluation in evaluations:
@@ -66,6 +79,9 @@ class StateEngine:
                     cause_id=evaluation.cause_id,
                 )
             )
+
+        if not enqueue_alerts:
+            return transitions
 
         groups: dict[str, list[RiskTransition]] = defaultdict(list)
         for index, transition in enumerate(transitions):

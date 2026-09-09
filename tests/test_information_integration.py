@@ -68,6 +68,26 @@ def detailed_item(source: str, stable_id: str, title: str, body: str) -> Announc
     )
 
 
+def published_detailed_item(
+    source: str,
+    stable_id: str,
+    title: str,
+    body: str,
+    published_at: datetime,
+) -> Announcement:
+    item = detailed_item(source, stable_id, title, body)
+    return Announcement(
+        item.source,
+        item.stable_id,
+        item.title,
+        item.url,
+        published_at,
+        item.body_hash,
+        item.first_seen_at,
+        item.metadata,
+    )
+
+
 @pytest.mark.asyncio
 async def test_broken_binance_does_not_block_occ_and_gets_health_risk(
     storage,
@@ -100,11 +120,12 @@ async def test_broken_binance_does_not_block_occ_and_gets_health_risk(
 async def test_binance_partial_failure_persists_risk_and_records_failure(
     storage,
 ) -> None:
-    risk_item = detailed_item(
+    risk_item = published_detailed_item(
         "binance",
         "later-risk",
         "General service update",
         "USD1 withdrawals are restricted",
+        NOW - timedelta(minutes=5),
     )
     partial_error = BinancePartialCollectionError(
         [risk_item],
@@ -324,12 +345,18 @@ async def test_unchanged_item_does_not_repeat_notification(
     storage,
 ) -> None:
     notifier = FakeNotifier()
-    item = occ_item()
+    item = published_detailed_item(
+        "binance",
+        "unchanged-risk",
+        "USD1 service update",
+        "USD1 withdrawals are suspended",
+        NOW - timedelta(minutes=5),
+    )
     monitor = InformationMonitor(
-        {"occ": FakeOfficialSource([[item], [item]])},
+        {"binance": FakeOfficialSource([[item], [item]])},
         storage,
         notifier,
-        intervals={"occ": 1},
+        intervals={"binance": 1},
     )
 
     await monitor.check_once(now=NOW)
@@ -377,11 +404,120 @@ async def test_latest_report_is_not_late_before_next_report_due_date(storage) ->
 
 @pytest.mark.asyncio
 async def test_risk_keyword_in_detail_body_is_classified(storage) -> None:
+    baseline = detailed_item(
+        "wlfi", "baseline", "Routine update", "USD1 service is operating"
+    )
     item = detailed_item(
-        "wlfi", "update", "Routine update", "USD1 custody restricted"
+        "wlfi", "update", "Routine update", "USD1 withdrawals are restricted"
+    )
+    monitor = InformationMonitor(
+        {"wlfi": FakeOfficialSource([[baseline], [baseline, item]])},
+        storage,
+        None,
+        intervals={"wlfi": 1},
+    )
+
+    await monitor.check_once(now=NOW)
+    await monitor.check_once(now=NOW + timedelta(seconds=1))
+
+    states = await storage.list_risk_states()
+    assert any(
+        state.rule_id.startswith("event.information.wlfi")
+        and state.level.name == "YELLOW"
+        for state in states
+    )
+    pending = await storage.pending_alerts()
+    assert len(pending) == 1
+    assert "USD1 withdrawals are restricted" in pending[0].content
+
+
+@pytest.mark.asyncio
+async def test_old_published_new_announcement_is_only_baselined(storage) -> None:
+    item = published_detailed_item(
+        "binance",
+        "old-risk",
+        "USD1 service update",
+        "USD1 withdrawals are suspended",
+        NOW - timedelta(days=2),
+    )
+    monitor = InformationMonitor(
+        {"binance": FakeOfficialSource([[item]])},
+        storage,
+        None,
+        intervals={"binance": 1},
+    )
+
+    await monitor.check_once(now=NOW)
+
+    assert await storage.latest_announcement("binance") is not None
+    assert not any(
+        state.rule_id.startswith("event.information.binance")
+        for state in await storage.list_risk_states()
+    )
+    assert await storage.pending_alerts() == []
+
+
+@pytest.mark.asyncio
+async def test_first_undated_source_snapshot_is_only_baselined(storage) -> None:
+    item = detailed_item(
+        "wlfi", "initial-risk", "USD1 update", "USD1 withdrawals are suspended"
     )
     monitor = InformationMonitor(
         {"wlfi": FakeOfficialSource([[item]])},
+        storage,
+        None,
+        intervals={"wlfi": 1},
+    )
+
+    await monitor.check_once(now=NOW)
+
+    assert await storage.latest_announcement("wlfi") is not None
+    assert not any(
+        state.rule_id.startswith("event.information.wlfi")
+        for state in await storage.list_risk_states()
+    )
+    assert await storage.pending_alerts() == []
+
+
+@pytest.mark.asyncio
+async def test_recent_published_new_risk_is_alerted_on_first_poll(storage) -> None:
+    item = published_detailed_item(
+        "binance",
+        "current-risk",
+        "USD1 service update",
+        "USD1 withdrawals are suspended",
+        NOW - timedelta(hours=1),
+    )
+    monitor = InformationMonitor(
+        {"binance": FakeOfficialSource([[item]])},
+        storage,
+        None,
+        intervals={"binance": 1},
+    )
+
+    await monitor.check_once(now=NOW)
+
+    states = await storage.list_risk_states()
+    assert any(
+        state.rule_id.startswith("event.information.binance")
+        and state.level.name == "YELLOW"
+        for state in states
+    )
+
+
+@pytest.mark.asyncio
+async def test_changed_announcement_still_creates_risk_without_source_baseline(
+    storage,
+) -> None:
+    original = detailed_item(
+        "wlfi", "changed-risk", "USD1 update", "USD1 service is operating"
+    )
+    changed = detailed_item(
+        "wlfi", "changed-risk", "USD1 update", "USD1 withdrawals are suspended"
+    )
+    await storage.upsert_announcement(original)
+    monitor = InformationMonitor(
+        {"wlfi": FakeOfficialSource([[changed]])},
         storage,
         None,
         intervals={"wlfi": 1},
@@ -395,6 +531,127 @@ async def test_risk_keyword_in_detail_body_is_classified(storage) -> None:
         and state.level.name == "YELLOW"
         for state in states
     )
+
+
+@pytest.mark.asyncio
+async def test_old_binance_scan_becoming_usd1_risk_is_alerted(storage) -> None:
+    published_at = NOW - timedelta(days=2)
+    scan_record = Announcement(
+        "binance_scan",
+        "edited-neutral",
+        "General service update",
+        "https://www.binance.com/edited-neutral",
+        published_at,
+        content_hash("General service update", "ABC service is operating"),
+        NOW - timedelta(days=1),
+        {
+            "body_text": "ABC service is operating",
+            "content_version": "body-v1",
+            "usd1_relevant": False,
+        },
+    )
+    await storage.upsert_announcement(scan_record)
+    risk_item = published_detailed_item(
+        "binance",
+        "edited-neutral",
+        "General service update",
+        "USD1 withdrawals are suspended",
+        published_at,
+    )
+    monitor = InformationMonitor(
+        {"binance": FakeOfficialSource([[risk_item]])},
+        storage,
+        None,
+        intervals={"binance": 1},
+    )
+
+    await monitor.check_once(now=NOW)
+
+    assert any(
+        state.rule_id.startswith(
+            "event.information.binance.edited-neutral"
+        )
+        and state.level.name == "YELLOW"
+        for state in await storage.list_risk_states()
+    )
+
+
+@pytest.mark.asyncio
+async def test_old_binance_detail_failure_is_not_promoted_as_change(storage) -> None:
+    published_at = NOW - timedelta(days=30)
+    failed_scan = Announcement(
+        "binance_scan",
+        "old-detail-failure",
+        "General service update",
+        "https://www.binance.com/old-detail-failure",
+        published_at,
+        content_hash("General service update", "detail-error:TimeoutError"),
+        NOW - timedelta(days=1),
+        {
+            "content_version": "detail-error-v1",
+            "scan_error": "TimeoutError",
+            "usd1_relevant": False,
+        },
+    )
+    await storage.upsert_announcement(failed_scan)
+    old_item = published_detailed_item(
+        "binance",
+        "old-detail-failure",
+        "General service update",
+        "USD1 withdrawals are suspended",
+        published_at,
+    )
+    monitor = InformationMonitor(
+        {"binance": FakeOfficialSource([[old_item]])},
+        storage,
+        None,
+        intervals={"binance": 1},
+    )
+
+    await monitor.check_once(now=NOW)
+
+    assert not any(
+        state.rule_id.startswith("event.information.binance")
+        for state in await storage.list_risk_states()
+    )
+    assert await storage.pending_alerts() == []
+
+
+@pytest.mark.asyncio
+async def test_separate_html_sections_do_not_cross_match(storage) -> None:
+    title = "General service update"
+    body = "USD1 Overview Other products withdrawals are restricted"
+    item = Announcement(
+        "binance",
+        "separate-sections",
+        title,
+        "https://www.binance.com/separate-sections",
+        NOW - timedelta(minutes=5),
+        content_hash(title, body),
+        NOW,
+        {
+            "body_text": body,
+            "body_sections": [
+                "USD1 Overview",
+                "Other products withdrawals are restricted",
+            ],
+            "content_version": "body-v1",
+        },
+    )
+    monitor = InformationMonitor(
+        {"binance": FakeOfficialSource([[item]])},
+        storage,
+        None,
+        intervals={"binance": 1},
+    )
+
+    await monitor.check_once(now=NOW)
+
+    assert not any(
+        state.rule_id.startswith("event.information.binance")
+        for state in await storage.list_risk_states()
+    )
+    assert await storage.pending_alerts() == []
 
 
 @pytest.mark.asyncio
@@ -523,6 +780,9 @@ async def test_announcement_is_rolled_back_when_state_commit_fails(
         storage,
         None,
         intervals={"wlfi": 1},
+    )
+    await storage.record_collector_success(
+        "official_wlfi", NOW - timedelta(seconds=1)
     )
 
     original_apply = StateEngine.apply_uncommitted

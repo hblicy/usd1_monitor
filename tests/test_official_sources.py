@@ -127,7 +127,15 @@ async def test_binance_collector_uses_public_json_api() -> None:
             if "detail/query" in url:
                 return {
                     "code": "000000",
-                    "data": {"body": "<main>USD1 custody terms changed</main>"},
+                    "data": {
+                        "body": (
+                            "<main><div>USD1 Overview</div>"
+                            "<div>Other products withdrawals are restricted</div>"
+                            "<table><tr><td>USD1</td>"
+                            "<td>Withdrawals are suspended</td></tr></table>"
+                            "</main>"
+                        )
+                    },
                 }
             return {
                 "code": "000000",
@@ -164,7 +172,15 @@ async def test_binance_collector_uses_public_json_api() -> None:
         ),
     ]
     assert items[0].first_seen_at == collected_at
-    assert items[0].metadata["body_text"] == "USD1 custody terms changed"
+    assert items[0].metadata["body_text"] == (
+        "USD1 Overview Other products withdrawals are restricted "
+        "USD1 Withdrawals are suspended"
+    )
+    assert items[0].metadata["body_sections"] == [
+        "USD1 Overview",
+        "Other products withdrawals are restricted",
+        "USD1 Withdrawals are suspended",
+    ]
 
 
 @pytest.mark.asyncio
@@ -1035,6 +1051,10 @@ async def test_official_collector_hashes_detail_body_not_title_and_url() -> None
         "USD1 reserve update", "USD1 reserve update Custodian changed."
     )
     assert item.metadata["body_text"] == "USD1 reserve update Custodian changed."
+    assert item.metadata["body_sections"] == [
+        "USD1 reserve update",
+        "Custodian changed.",
+    ]
     assert item.metadata["content_version"] == "body-v1"
 
 

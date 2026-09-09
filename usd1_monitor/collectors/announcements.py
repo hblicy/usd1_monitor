@@ -95,7 +95,41 @@ def normalize_text(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip()
 
 
-def _detail_body_text(html: str) -> str:
+_BODY_SECTION_TAGS = (
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "p",
+    "li",
+    "blockquote",
+    "div",
+    "section",
+    "pre",
+    "dt",
+    "dd",
+    "tr",
+    "td",
+    "th",
+)
+
+
+def _body_sections(content, fallback: str) -> list[str]:
+    sections: list[str] = []
+    for element in content.find_all(_BODY_SECTION_TAGS):
+        if element.name in {"td", "th"} and element.find_parent("tr"):
+            continue
+        if element.name != "tr" and element.find(_BODY_SECTION_TAGS):
+            continue
+        text = normalize_text(element.get_text(" "))
+        if text:
+            sections.append(text)
+    return sections or [fallback]
+
+
+def _detail_body_content(html: str) -> tuple[str, list[str]]:
     soup = BeautifulSoup(html, "html.parser")
     content = soup.find("main") or soup.find("article")
     if content is None:
@@ -121,7 +155,12 @@ def _detail_body_text(html: str) -> str:
         body_text = normalize_text(markdown_body)
         if not body_text:
             raise PageStructureError("detail page has no readable text")
-        return body_text
+        sections = [
+            text
+            for line in markdown_body.splitlines()
+            if (text := normalize_text(line))
+        ]
+        return body_text, sections or [body_text]
     for element in content.find_all(
         ["nav", "header", "footer", "script", "style", "noscript"]
     ):
@@ -129,6 +168,11 @@ def _detail_body_text(html: str) -> str:
     body_text = normalize_text(content.get_text(" "))
     if not body_text:
         raise PageStructureError("detail page has no readable main/article content")
+    return body_text, _body_sections(content, body_text)
+
+
+def _detail_body_text(html: str) -> str:
+    body_text, _ = _detail_body_content(html)
     return body_text
 
 
@@ -455,10 +499,11 @@ class OfficialPageCollector:
                 }
             else:
                 detail_html = await self._http.get_text(item.url)
-                body_text = _detail_body_text(detail_html)
+                body_text, body_sections = _detail_body_content(detail_html)
                 body_hash = content_hash(item.title, body_text)
                 metadata = {
                     "body_text": body_text,
+                    "body_sections": body_sections,
                     "content_version": "body-v1",
                 }
             enriched.append(
@@ -612,7 +657,13 @@ class BinanceAnnouncementCollector:
 
         async def fetch_detail(
             item: Announcement,
-        ) -> tuple[Announcement, str | None, Exception | None, bool]:
+        ) -> tuple[
+            Announcement,
+            str | None,
+            list[str] | None,
+            Exception | None,
+            bool,
+        ]:
             attempted = False
             try:
                 async with asyncio.timeout(BINANCE_DETAIL_TIMEOUT_SECONDS):
@@ -634,21 +685,27 @@ class BinanceAnnouncementCollector:
                             "invalid Binance announcement detail response"
                         )
                     detail_html = detail_payload["data"]["body"]
-                    body_text = normalize_text(
-                        BeautifulSoup(detail_html, "html.parser").get_text(" ")
-                    )
+                    detail_soup = BeautifulSoup(detail_html, "html.parser")
+                    body_text = normalize_text(detail_soup.get_text(" "))
                     if not body_text:
                         raise PageStructureError(
                             "Binance detail page has no readable text"
                         )
+                    body_sections = _body_sections(detail_soup, body_text)
             except Exception as exc:
-                return item, None, exc, attempted
-            return item, body_text, None, attempted
+                return item, None, None, exc, attempted
+            return item, body_text, body_sections, None, attempted
 
         detail_results = await asyncio.gather(
             *(fetch_detail(item) for item in items)
         )
-        for item, body_text, detail_error, attempted in detail_results:
+        for (
+            item,
+            body_text,
+            body_sections,
+            detail_error,
+            attempted,
+        ) in detail_results:
             if detail_error is not None:
                 exc = detail_error
                 failures.append((item.stable_id, exc))
@@ -674,6 +731,7 @@ class BinanceAnnouncementCollector:
                     )
                 continue
             assert body_text is not None
+            assert body_sections is not None
             relevant = matches_usd1(f"{item.title} {body_text}")
             result = Announcement(
                 item.source if relevant else "binance_scan",
@@ -685,6 +743,7 @@ class BinanceAnnouncementCollector:
                 collected_at,
                 {
                     "body_text": body_text,
+                    "body_sections": body_sections,
                     "content_version": "body-v1",
                     "usd1_relevant": relevant,
                 },
