@@ -35,7 +35,19 @@ http:
     assert config.market.depth_limit == 1000
     assert config.market.severe_price == 0.99
     assert config.market.severe_seconds == 3600
+    assert config.http.rpc_throughput_cups == 270
     assert config.wechat_webhook is None
+
+
+def test_load_config_rejects_non_positive_rpc_throughput(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        "database_path: monitor.db\nhttp:\n  rpc_throughput_cups: 0\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match="greater than 0"):
+        load_config(path, environ={})
 
 
 def test_load_config_rejects_inverted_market_thresholds(tmp_path: Path) -> None:

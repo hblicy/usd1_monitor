@@ -1,3 +1,4 @@
+import asyncio
 import traceback
 
 import aiohttp
@@ -9,6 +10,8 @@ from usd1_monitor.http import (
     HttpBodyTooLargeError,
     HttpRequestError,
     HttpResponseError,
+    _RpcThroughputLimiter,
+    _rpc_throughput_cost,
     sanitize_url,
 )
 
@@ -18,6 +21,166 @@ def test_sanitize_url_removes_query_and_fragment() -> None:
         sanitize_url("https://rpc.example/v1?key=secret#fragment")
         == "https://rpc.example"
     )
+
+
+@pytest.mark.parametrize(
+    ("method", "expected"),
+    [
+        ("eth_chainId", 5),
+        ("eth_blockNumber", 10),
+        ("eth_getLogs", 60),
+        ("eth_call", 26),
+        ("eth_getBlockByNumber", 20),
+        ("eth_getStorageAt", 20),
+        ("eth_getCode", 20),
+        ("eth_getTransactionReceipt", 20),
+    ],
+)
+def test_rpc_throughput_cost_uses_known_method_weights(
+    method: str, expected: int
+) -> None:
+    assert _rpc_throughput_cost(
+        {"jsonrpc": "2.0", "method": method}
+    ) == expected
+
+
+def test_rpc_throughput_cost_ignores_non_rpc_payload() -> None:
+    assert _rpc_throughput_cost({"method": "eth_call"}) == 0
+
+
+@pytest.mark.asyncio
+async def test_rpc_throughput_limiter_waits_for_shared_token_deficit() -> None:
+    now = 0.0
+    waits: list[float] = []
+
+    def clock() -> float:
+        return now
+
+    async def sleep(delay: float) -> None:
+        nonlocal now
+        waits.append(delay)
+        now += delay
+
+    limiter = _RpcThroughputLimiter(
+        10, window_seconds=10, clock=clock, sleep=sleep
+    )
+    await asyncio.gather(limiter.acquire(80), limiter.acquire(80))
+
+    assert waits == pytest.approx([6.0])
+
+
+@pytest.mark.asyncio
+async def test_rpc_throughput_limiter_caps_refill_at_window_capacity() -> None:
+    now = 0.0
+    waits: list[float] = []
+
+    def clock() -> float:
+        return now
+
+    async def sleep(delay: float) -> None:
+        nonlocal now
+        waits.append(delay)
+        now += delay
+
+    limiter = _RpcThroughputLimiter(
+        10, window_seconds=10, clock=clock, sleep=sleep
+    )
+    await limiter.acquire(100)
+    now = 100.0
+    await limiter.acquire(100)
+    await limiter.acquire(1)
+
+    assert waits == pytest.approx([0.1])
+
+
+@pytest.mark.asyncio
+async def test_rpc_retries_each_acquire_throughput_tokens(monkeypatch) -> None:
+    class Content:
+        async def iter_chunked(self, size):
+            yield b"{}"
+
+    class ErrorResponse:
+        status = 429
+        content_length = None
+        content = Content()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+    class Session:
+        closed = False
+
+        def request(self, method, url, **kwargs):
+            return ErrorResponse()
+
+    class RecordingLimiter:
+        def __init__(self) -> None:
+            self.costs: list[int] = []
+
+        async def acquire(self, cost: int) -> None:
+            self.costs.append(cost)
+
+    async def no_sleep(delay: float) -> None:
+        return None
+
+    client = AsyncHttpClient(HttpConfig(timeout_seconds=1, retries=2))
+    client._session = Session()
+    limiter = RecordingLimiter()
+    client._rpc_throughput_limiter = limiter
+    monkeypatch.setattr(asyncio, "sleep", no_sleep)
+
+    with pytest.raises(HttpRequestError):
+        await client.post_json(
+            "https://rpc.example/v2/secret",
+            {"jsonrpc": "2.0", "method": "eth_call", "params": []},
+        )
+
+    assert limiter.costs == [26, 26, 26]
+
+
+@pytest.mark.asyncio
+async def test_non_rpc_json_post_bypasses_throughput_limiter() -> None:
+    class Content:
+        async def iter_chunked(self, size):
+            yield b"{}"
+
+    class SuccessResponse:
+        status = 200
+        content_length = None
+        content = Content()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+    class Session:
+        closed = False
+
+        def request(self, method, url, **kwargs):
+            return SuccessResponse()
+
+    class RecordingLimiter:
+        def __init__(self) -> None:
+            self.costs: list[int] = []
+
+        async def acquire(self, cost: int) -> None:
+            self.costs.append(cost)
+
+    client = AsyncHttpClient(HttpConfig(timeout_seconds=1, retries=0))
+    client._session = Session()
+    limiter = RecordingLimiter()
+    client._rpc_throughput_limiter = limiter
+
+    assert await client.post_json(
+        "https://notify.example/hook",
+        {"method": "eth_call", "message": "notification"},
+    ) == {}
+    assert limiter.costs == []
 
 
 def test_http_error_never_renders_query_values() -> None:
