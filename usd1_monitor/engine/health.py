@@ -31,3 +31,22 @@ def evaluate_health(
     if health.consecutive_failures >= 3:
         return RiskLevel.YELLOW
     return RiskLevel.GREEN
+
+
+def evaluate_health_with_recovery(
+    health: CollectorHealth,
+    now: datetime,
+    *,
+    critical: bool,
+    previous_level: RiskLevel,
+    recovery_seconds: int = 60,
+) -> RiskLevel:
+    current = evaluate_health(health, now, critical=critical)
+    if (
+        current is RiskLevel.GREEN
+        and previous_level is not RiskLevel.GREEN
+        and health.last_failure_at is not None
+        and (now - health.last_failure_at).total_seconds() < recovery_seconds
+    ):
+        return previous_level
+    return current

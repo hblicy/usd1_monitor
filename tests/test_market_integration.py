@@ -26,7 +26,8 @@ async def test_market_monitor_persists_one_yellow_transition(
 
     assert result.success is True
     assert len(fake_notifier.messages) == 1
-    assert "YELLOW" in fake_notifier.messages[0]
+    assert fake_notifier.messages[0].startswith("🟡 USD1 注意")
+    assert "USD1 价格低于预警线" in fake_notifier.messages[0]
     assert (await storage.get_risk_state("market.price")).level.name == "YELLOW"
 
 
@@ -59,8 +60,13 @@ async def test_startup_notice_is_sent_once_and_not_from_check(
     await monitor.send_startup_once()
 
     assert len(fake_notifier.messages) == 1
-    assert "0.1.0" in fake_notifier.messages[0]
-    assert "NOT_MONITORED" in fake_notifier.messages[0]
+    message = fake_notifier.messages[0]
+    assert message.startswith("🟢 USD1 监控已启动")
+    assert "正在监控：\n价格、流动性、交易状态" in message
+    assert "暂未覆盖：" in message
+    assert "社交媒体情绪" in message
+    for hidden in ("enabled_collectors", "NOT_MONITORED", "binance_market"):
+        assert hidden not in message
 
 
 @pytest.mark.asyncio
@@ -211,7 +217,7 @@ async def test_market_monitor_emits_separate_severe_depeg_alert(
     pending = await storage.pending_alerts()
     assert state is not None
     assert state.level is RiskLevel.RED
-    assert any("market.price.severe" in item.content for item in pending)
+    assert any("USD1 价格持续严重偏离 1 美元" in item.content for item in pending)
 
 
 @pytest.mark.asyncio
@@ -286,8 +292,10 @@ async def test_same_market_cycle_groups_price_and_liquidity_alerts(storage) -> N
 
     pending = await storage.pending_alerts()
     assert len(pending) == 1
-    assert "market.price" in pending[0].content
-    assert "market.liquidity" in pending[0].content
+    assert "USD1 价格低于预警线" in pending[0].content
+    assert "USD1 市场流动性不足" in pending[0].content
+    assert "market.price" not in pending[0].content
+    assert "market.liquidity" not in pending[0].content
 
 
 @pytest.mark.asyncio
@@ -333,5 +341,5 @@ async def test_market_alert_contains_all_configured_exit_sizes(storage) -> None:
 
     pending = await storage.pending_alerts()
     assert len(pending) == 1
-    assert "5000000" in pending[0].content
-    assert "20000000" in pending[0].content
+    assert "500 万 USD1" in pending[0].content
+    assert "2000 万 USD1" in pending[0].content
