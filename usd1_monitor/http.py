@@ -15,10 +15,15 @@ class HttpRequestError(RuntimeError):
         self.method = method
         self.url = sanitize_url(url)
         self.attempts = attempts
-        self.cause = RuntimeError(type(cause).__name__)
+        cause_summary = type(cause).__name__
+        if isinstance(cause, HttpResponseError):
+            cause_summary += f" status={cause.status}"
+            if cause.error_code is not None:
+                cause_summary += f" code={cause.error_code}"
+        self.cause = RuntimeError(cause_summary)
         super().__init__(
             f"{method} {self.url} failed after {attempts} attempt(s): "
-            f"{type(cause).__name__}"
+            f"{cause_summary}"
         )
 
 
