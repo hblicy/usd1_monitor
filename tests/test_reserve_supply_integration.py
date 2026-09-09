@@ -585,7 +585,7 @@ async def test_native_drop_is_evaluated_when_defillama_fails(storage) -> None:
     assert state is not None and state.level is RiskLevel.RED
     pending = await storage.pending_alerts()
     native_alert = next(
-        item for item in pending if "supply.native_drop_24h" in item.content
+        item for item in pending if "USD1 链上供应量在 24 小时内明显下降" in item.content
     )
     assert "https://etherscan.io/block/123" in native_alert.content
     assert "https://bscscan.com/block/123" in native_alert.content

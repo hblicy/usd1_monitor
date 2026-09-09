@@ -33,6 +33,7 @@ def test_plain_text_helpers_render_chinese_status_time_and_sources() -> None:
         "https://two",
     ]
     assert wechat._source_urls({}) == []
+    assert wechat._display_time(NOW, "UTC") == "2026-09-07 04:30:00（UTC）"
 
 
 @pytest.mark.asyncio
@@ -81,17 +82,31 @@ def transition(
     )
 
 
-def test_alert_message_contains_required_evidence() -> None:
+def test_alert_message_uses_plain_chinese_summary() -> None:
     content = format_transitions(
         [transition("market.price", RiskLevel.GREEN, RiskLevel.YELLOW)]
     )
 
-    assert "YELLOW" in content
-    assert "market.price" in content
-    assert "0.996" in content
-    assert "0.997" in content
-    assert "2026-09-07T12:30:00+08:00" in content
-    assert "https://api.binance.com/api/v3/depth" in content
+    assert content.startswith("🟡 USD1 注意")
+    assert "发生了什么：USD1 价格低于预警线" in content
+    assert "当前价格：0.996" in content
+    assert "预警价格：0.997" in content
+    assert "发现时间：2026-09-07 12:30:00（北京时间）" in content
+    assert "信息来源：\nhttps://api.binance.com/api/v3/depth" in content
+    assert "建议：请打开信息来源并人工确认。" in content
+    for hidden in (
+        "market.price",
+        "rule_id",
+        "当前值=",
+        "阈值=",
+        "GREEN",
+        "YELLOW",
+        "##",
+        "**",
+        "- ",
+        "](",
+    ):
+        assert hidden not in content
 
 
 def test_alert_message_renders_all_source_urls() -> None:
@@ -128,9 +143,11 @@ def test_alert_message_contains_severe_and_exit_capacity_details() -> None:
 
     content = format_transitions([item])
 
-    assert "severe_threshold=0.99" in content
-    assert "severe_duration_seconds=3600" in content
-    assert "exit_capacity=" in content
+    assert "发生了什么：USD1 价格持续严重偏离 1 美元" in content
+    assert "危险价格：0.99" in content
+    assert "持续条件：60 分钟" in content
+    assert "exit_capacity" not in content
+    assert "severe_threshold" not in content
 
 
 def test_alert_times_default_to_asia_shanghai() -> None:
@@ -138,7 +155,7 @@ def test_alert_times_default_to_asia_shanghai() -> None:
         [transition("market.price", RiskLevel.GREEN, RiskLevel.YELLOW)]
     )
 
-    assert "2026-09-07T12:30:00+08:00" in content
+    assert "2026-09-07 12:30:00（北京时间）" in content
 
 
 def test_recovery_message_names_previous_level() -> None:
@@ -146,8 +163,9 @@ def test_recovery_message_names_previous_level() -> None:
         [transition("market.price", RiskLevel.RED, RiskLevel.GREEN)]
     )
 
-    assert "恢复" in content
-    assert "RED" in content
+    assert content.startswith("🟢 USD1 已恢复正常")
+    assert "发生了什么：USD1 价格已恢复正常" in content
+    assert "RED" not in content
 
 
 def test_explicit_green_overall_is_not_replaced_by_event_level() -> None:
@@ -156,8 +174,9 @@ def test_explicit_green_overall_is_not_replaced_by_event_level() -> None:
         overall_level=RiskLevel.GREEN,
     )
 
-    assert content.startswith("USD1 风险事件：YELLOW")
-    assert "当前持续状态：GREEN" in content
+    assert content.startswith("🟡 USD1 注意")
+    assert "GREEN" not in content
+    assert "YELLOW" not in content
 
 
 def test_same_cause_is_rendered_once_with_two_evidence_lines() -> None:
@@ -168,11 +187,11 @@ def test_same_cause_is_rendered_once_with_two_evidence_lines() -> None:
         ]
     )
 
-    assert content.count("原因 depeg") == 1
-    assert content.count("当前值=0.996") == 2
+    assert "depeg" not in content
+    assert content.count("发生了什么：") == 2
 
 
-def test_evm_alert_includes_transaction_evidence_fields() -> None:
+def test_evm_alert_uses_human_summary_and_hides_internal_fields() -> None:
     event = RiskTransition(
         rule_id="evm.event.ethereum.0xtx:-1",
         previous=RiskLevel.GREEN,
@@ -192,19 +211,14 @@ def test_evm_alert_includes_transaction_evidence_fields() -> None:
 
     content = format_transitions([event])
 
-    for expected in (
-        "fact_type=PRIVILEGED_UNKNOWN_CALL",
-        "chain=ethereum",
-        "event_key=0xtx:-1",
-        "sender=0xsender",
-        "to=0xtarget",
-        "selector=0x12345678",
-    ):
-        assert expected in content
-    assert "unknown" not in content
+    assert "发生了什么：Ethereum 检测到未知的高权限合约调用" in content
+    assert "发起地址：0xsender" in content
+    assert "目标地址：0xtarget" in content
+    for hidden in ("fact_type", "event_key", "selector", "0xtx:-1", "0x12345678"):
+        assert hidden not in content
 
 
-def test_health_alert_includes_last_error() -> None:
+def test_health_alert_is_distinct_from_business_risk() -> None:
     health = RiskTransition(
         rule_id="health.por",
         previous=RiskLevel.GREEN,
@@ -216,7 +230,46 @@ def test_health_alert_includes_last_error() -> None:
 
     content = format_transitions([health])
 
-    assert "last_error=RPC timeout" in content
+    assert content.startswith("🟡 USD1 监控异常")
+    assert "发生了什么：储备证明数据连续 3 次未能获取" in content
+    assert "建议：请检查监控服务和数据源是否正常。" in content
+    assert "RPC timeout" not in content
+    assert "health.por" not in content
+
+
+@pytest.mark.parametrize(
+    ("rule_id", "evidence", "expected"),
+    (
+        ("market.liquidity", {}, "USD1 市场流动性不足"),
+        ("por.age", {"current": 8000}, "USD1 储备数据长时间没有更新"),
+        (
+            "supply.estimated_coverage",
+            {"current": 98.4},
+            "USD1 估算储备覆盖率异常",
+        ),
+        (
+            "event.information.binance.notice.hash",
+            {"threshold": "official risk phrase: USD1 withdrawals are suspended"},
+            "官方公告提到：USD1 withdrawals are suspended",
+        ),
+    ),
+)
+def test_existing_rule_types_have_human_summary(
+    rule_id: str, evidence: dict[str, object], expected: str
+) -> None:
+    item = transition(rule_id, RiskLevel.GREEN, RiskLevel.YELLOW)
+    item.evidence.update(evidence)
+
+    assert expected in format_transitions([item])
+
+
+def test_unknown_rule_uses_generic_summary_without_internal_id() -> None:
+    content = format_transitions(
+        [transition("future.internal.rule", RiskLevel.GREEN, RiskLevel.YELLOW)]
+    )
+
+    assert "发生了什么：监控发现异常，请打开信息来源并人工确认" in content
+    assert "future.internal.rule" not in content
 
 
 @pytest.mark.asyncio
@@ -285,7 +338,8 @@ async def test_recovery_alert_uses_complete_persisted_overall_state(storage) -> 
 
     pending = await storage.pending_alerts()
     assert len(pending) == 1
-    assert "USD1 风险状态：RED" in pending[0].content
+    assert pending[0].content.startswith("🔴 USD1 危险")
+    assert "🟢 USD1 已恢复正常" not in pending[0].content
 
 
 @pytest.mark.asyncio
@@ -296,8 +350,8 @@ async def test_health_alert_uses_monitor_health_not_business_overall(storage) ->
 
     pending = await storage.pending_alerts()
 
-    assert pending[0].content.startswith("USD1 监控健康：RED")
-    assert "当前持续状态：GREEN" not in pending[0].content
+    assert pending[0].content.startswith("🔴 USD1 监控异常")
+    assert "USD1 危险" not in pending[0].content
 
 
 @pytest.mark.asyncio
@@ -317,7 +371,7 @@ async def test_alert_times_use_configured_timezone(tmp_path) -> None:
     finally:
         await storage.close()
 
-    assert "2026-09-07T04:30:00+00:00" in pending[0].content
+    assert "2026-09-07 04:30:00（UTC）" in pending[0].content
 
 
 @pytest.mark.asyncio
@@ -325,7 +379,7 @@ async def test_state_engine_splits_alerts_at_wechat_utf8_limit(storage) -> None:
     evaluation = RuleEvaluation(
         "health.official_wlfi",
         RiskLevel.RED,
-        {"last_error": "采集失败" * 800},
+        {"source_url": "https://example.com/" + "a" * 5000},
         cause_id="oversized-alert",
     )
     expected = format_transitions(
@@ -457,7 +511,8 @@ async def test_cancelled_pending_alert_does_not_consume_delivery_slot(
     await _deliver_pending(storage, notifier, rate_limiter=limiter)
 
     assert len(notifier.messages) == 1
-    assert "market.current" in notifier.messages[0]
+    assert "监控发现异常" in notifier.messages[0]
+    assert "market.current" not in notifier.messages[0]
 
 
 @pytest.mark.asyncio

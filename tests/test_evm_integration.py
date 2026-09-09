@@ -107,7 +107,8 @@ async def test_implementation_upgrade_alerts_once_and_replay_is_quiet(
     await monitor.check_once()
 
     assert len(fake_notifier.messages) == 1
-    assert "RED" in fake_notifier.messages[0]
+    assert fake_notifier.messages[0].startswith("🔴 USD1 危险")
+    assert "USD1 实现合约发生变化" in fake_notifier.messages[0]
     states = await storage.list_risk_states()
     assert any(item.level is RiskLevel.RED for item in states)
 
@@ -431,8 +432,10 @@ async def test_upgrade_event_and_snapshot_changes_share_one_alert(
     await monitor.check_once()
 
     assert len(fake_notifier.messages) == 1
-    assert "IMPLEMENTATION_CHANGED" in fake_notifier.messages[0]
-    assert "CODE_HASH_CHANGED" in fake_notifier.messages[0]
+    assert "USD1 实现合约发生变化" in fake_notifier.messages[0]
+    assert "IMPLEMENTATION_CHANGED" not in fake_notifier.messages[0]
+    assert "USD1 合约代码发生变化" in fake_notifier.messages[0]
+    assert "CODE_HASH_CHANGED" not in fake_notifier.messages[0]
 
 
 @pytest.mark.asyncio
@@ -467,7 +470,7 @@ async def test_overlap_reconciles_event_removed_by_reorg(
     assert await storage.count_chain_events() == 0
     state = await storage.get_risk_state(f"evm.bsc.freeze.{ADDRESS_A.lower()}")
     assert state is not None and state.level is RiskLevel.GREEN
-    assert any("reorg" in message.lower() for message in fake_notifier.messages)
+    assert any("链上重组" in message for message in fake_notifier.messages)
     assert any(
         "https://bscscan.com/block/101" in message
         for message in fake_notifier.messages
