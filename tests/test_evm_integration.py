@@ -27,12 +27,14 @@ def snapshot(
     paused: bool | None = False,
     frozen_accounts: dict[str, bool] | None = None,
     code_hash: str = "0xhash",
+    admin_owner: str | None = None,
 ) -> EvmSnapshot:
     values = (
         Observation("evm.implementation", "evm_rpc", chain, 1, "address", NOW, NOW, metadata={"address": implementation, "block": block}),
         Observation("evm.admin", "evm_rpc", chain, 1, "address", NOW, NOW, metadata={"address": ADMIN, "block": block}),
         Observation("evm.code_hash", "evm_rpc", chain, 1, "hash", NOW, NOW, metadata={"hash": code_hash, "block": block}),
         Observation("evm.owner", "evm_rpc", chain, 0, "address", NOW, NOW, metadata={"address": None, "supported": False, "block": block}),
+        Observation("evm.admin_owner", "evm_rpc", chain, 1 if admin_owner else 0, "address", NOW, NOW, metadata={"address": admin_owner, "supported": admin_owner is not None, "block": block}),
         Observation(
             "evm.paused",
             "evm_rpc",
@@ -53,6 +55,7 @@ def snapshot(
         None,
         paused,
         values,
+        admin_owner=admin_owner,
         frozen_accounts=frozen_accounts or {},
     )
 
@@ -290,6 +293,94 @@ async def test_known_proxy_admin_upgrade_enters_risk_engine(
     state = next(item for item in states if "0xupgrade:-1" in item.rule_id)
     assert state.level is RiskLevel.RED
     assert len(fake_notifier.messages) == 1
+
+
+@pytest.mark.asyncio
+async def test_monitor_alerts_when_proxy_admin_owner_changes(storage) -> None:
+    monitor = EvmChainMonitor(
+        "ethereum",
+        FakeScanner([scan("ethereum", 100), scan("ethereum", 101)]),
+        FakeSnapshotReader(
+            [
+                snapshot(
+                    "ethereum", 100, ADDRESS_A, admin_owner=ADDRESS_A
+                ),
+                snapshot(
+                    "ethereum", 101, ADDRESS_A, admin_owner=ADDRESS_B
+                ),
+            ]
+        ),
+        storage,
+    )
+
+    await monitor.check_once(deliver=False)
+    result = await monitor.check_once(deliver=False)
+
+    state = await storage.get_risk_state(
+        "evm.event.ethereum.snapshot:101:evm.admin_owner"
+    )
+    assert result.success
+    assert state is not None and state.level is RiskLevel.RED
+
+
+@pytest.mark.asyncio
+async def test_newly_supported_proxy_admin_owner_establishes_baseline(
+    storage,
+) -> None:
+    monitor = EvmChainMonitor(
+        "ethereum",
+        FakeScanner([scan("ethereum", 100), scan("ethereum", 101)]),
+        FakeSnapshotReader(
+            [
+                snapshot("ethereum", 100, ADDRESS_A, admin_owner=None),
+                snapshot(
+                    "ethereum", 101, ADDRESS_A, admin_owner=ADDRESS_B
+                ),
+            ]
+        ),
+        storage,
+    )
+
+    await monitor.check_once(deliver=False)
+    result = await monitor.check_once(deliver=False)
+
+    state = await storage.get_risk_state(
+        "evm.event.ethereum.snapshot:101:evm.admin_owner"
+    )
+    assert result.success
+    assert state is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "event_type", ["IMPLEMENTATION_CHANGED", "ADMIN_CHANGED"]
+)
+async def test_standard_proxy_permission_event_enters_risk_engine(
+    storage, event_type: str
+) -> None:
+    event = ChainEvent(
+        "ethereum",
+        101,
+        "0xpermission",
+        1,
+        event_type,
+        {"to_address": ADDRESS_B},
+        NOW,
+    )
+    monitor = EvmChainMonitor(
+        "ethereum",
+        FakeScanner([scan("ethereum", 101, [event])]),
+        FakeSnapshotReader([snapshot("ethereum", 101, ADDRESS_A)]),
+        storage,
+    )
+
+    result = await monitor.check_once(deliver=False)
+
+    state = await storage.get_risk_state(
+        "evm.event.ethereum.0xpermission:1"
+    )
+    assert result.success
+    assert state is not None and state.level is RiskLevel.RED
 
 
 @pytest.mark.asyncio
