@@ -1008,8 +1008,9 @@ async def test_composite_startup_notification_uses_plain_chinese(storage) -> Non
     assert len(notifier.messages) == 1
     message = notifier.messages[0]
     assert message.startswith("🟢 USD1 监控已启动")
-    assert "Ethereum 链上合约" in message
-    assert "BNB Chain 链上合约" in message
+    assert "Ethereum 合约权限" in message
+    assert "BNB Chain 合约权限" in message
+    assert "链上合约" not in message
     assert "储备与供应量" in message
     assert "官方公告" in message
     for hidden in ("enabled_collectors", "NOT_MONITORED", "evm_bsc"):

@@ -30,17 +30,19 @@ chains:
     token_address: "0x8d0D000Ee44948FC98c9B98A4FA4921476f08B0d"
     rpc_urls: [https://ethereum-rpc.publicnode.com, https://eth.llamarpc.com]
     confirmation_depth: 3
-    interval_seconds: 30
+    interval_seconds: 600
     overlap_blocks: 20
-    scan_batch_blocks: 60
+    scan_batch_blocks: 2000
+    log_query_chunk_blocks: 500
   bsc:
     chain_id: 56
     token_address: "0x8d0D000Ee44948FC98c9B98A4FA4921476f08B0d"
     rpc_urls: [https://bsc-dataseed.binance.org, https://bsc-rpc.publicnode.com]
     confirmation_depth: 10
-    interval_seconds: 15
+    interval_seconds: 600
     overlap_blocks: 20
-    scan_batch_blocks: 60
+    scan_batch_blocks: 2000
+    log_query_chunk_blocks: 500
 watched_addresses: []
 por:
   address: "0x691b74146cdba162449012aa32d3cbf5df77d4c4"

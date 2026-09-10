@@ -1,6 +1,6 @@
 # USD1 公开数据风险监控器
 
-这是一个只读监控程序：不需要交易所 API Key 或钱包私钥，不下单、不兑换、不执行资产操作。它监控 Binance 公开盘口、Ethereum/BNB Chain 合约与供应、USD1 PoR Oracle、DefiLlama 估算全链供应，以及 Binance、BitGo、WLFI、OCC 官方页面；状态变化和恢复可通过企业微信机器人通知。
+这是一个只读监控程序：不需要交易所 API Key 或钱包私钥，不下单、不兑换、不执行资产操作。它监控 Binance 公开盘口、Ethereum/BNB Chain 合约权限与供应、USD1 PoR Oracle、DefiLlama 估算全链供应，以及 Binance、BitGo、WLFI、OCC 官方页面；状态变化和恢复可通过企业微信机器人通知。
 
 ## 本地运行
 
@@ -18,6 +18,8 @@ cp .env.example .env
 ```
 
 Windows 可用 `Copy-Item` 代替 `cp`。按部署环境修改 `config.yaml`，尤其是 RPC URL 和 `watched_addresses`。`.env` 只保存敏感/环境值：
+
+已有部署升级后，需要在实际 `config.yaml` 的 `chains.ethereum` 和 `chains.bsc` 下都设置 `interval_seconds: 600`、`scan_batch_blocks: 2000`、`log_query_chunk_blocks: 500`，然后重启服务。程序不会自动覆盖实际配置文件。
 
 程序会自动读取 `config.yaml` 同目录的 `.env`，且不会覆盖 shell 或 systemd 已显式设置的环境变量。观测数据默认保留 180 天，可通过 `retention_days` 调整。
 

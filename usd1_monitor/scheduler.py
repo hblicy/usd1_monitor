@@ -1284,7 +1284,7 @@ class Usd1Monitor:
             return
         monitored = ["价格", "流动性", "交易状态"]
         monitored.extend(
-            f"{CHAIN_LABELS.get(item.chain, item.chain)} 链上合约"
+            f"{CHAIN_LABELS.get(item.chain, item.chain)} 合约权限"
             for item in self._evm_chains
         )
         if self._reserve_supply is not None:
