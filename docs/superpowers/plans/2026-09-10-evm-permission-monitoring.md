@@ -16,7 +16,7 @@
 - Modify: `usd1_monitor/config.py:83-101`
 - Modify: `tests/test_config.py`
 
-- [ ] **Step 1: 写入会失败的配置测试**
+- [x] **Step 1: 写入会失败的配置测试**
 
 ```python
 def test_chain_config_accepts_permission_monitor_scan_sizes() -> None:
@@ -46,12 +46,12 @@ def test_chain_config_rejects_log_chunk_larger_than_scan_batch() -> None:
         )
 ```
 
-- [ ] **Step 2: 运行测试并确认因字段或上限不存在而失败**
+- [x] **Step 2: 运行测试并确认因字段或上限不存在而失败**
 
 Run: `python -m pytest tests/test_config.py -q`
 Expected: FAIL，`scan_batch_blocks=2000` 超出现有上限或 `log_query_chunk_blocks` 被禁止。
 
-- [ ] **Step 3: 最小实现配置字段和一致性校验**
+- [x] **Step 3: 最小实现配置字段和一致性校验**
 
 ```python
 class ChainConfig(StrictModel):
@@ -70,12 +70,12 @@ class ChainConfig(StrictModel):
         return self
 ```
 
-- [ ] **Step 4: 运行配置测试并确认通过**
+- [x] **Step 4: 运行配置测试并确认通过**
 
 Run: `python -m pytest tests/test_config.py -q`
 Expected: PASS。
 
-- [ ] **Step 5: 提交配置模型改动**
+- [x] **Step 5: 提交配置模型改动**
 
 ```bash
 git add usd1_monitor/config.py tests/test_config.py
@@ -89,7 +89,7 @@ git commit -m "支持EVM低频批量扫描配置"
 - Modify: `usd1_monitor/cli.py:94-102`
 - Modify: `tests/test_evm_scanner.py`
 
-- [ ] **Step 1: 写入 2,000/500 分块和 BSC 追赶测试**
+- [x] **Step 1: 写入 2,000/500 分块和 BSC 追赶测试**
 
 ```python
 @pytest.mark.asyncio
@@ -119,12 +119,12 @@ async def test_scanner_chunks_two_thousand_blocks_into_four_queries(storage) -> 
     assert result.cursor == result.safe_head == 2_080
 ```
 
-- [ ] **Step 2: 运行测试并确认固定 10 区块跨度导致失败**
+- [x] **Step 2: 运行测试并确认固定 10 区块跨度导致失败**
 
 Run: `python -m pytest tests/test_evm_scanner.py::test_scanner_chunks_two_thousand_blocks_into_four_queries -q`
 Expected: FAIL，构造函数不接受 `log_query_chunk_blocks` 或请求次数不是 4。
 
-- [ ] **Step 3: 注入日志跨度并从 CLI 传入链配置**
+- [x] **Step 3: 注入日志跨度并从 CLI 传入链配置**
 
 ```python
 class EvmScanner:
@@ -152,12 +152,12 @@ for batch_start in range(start, end + 1, self._log_query_chunk_blocks):
 log_query_chunk_blocks=chain_config.log_query_chunk_blocks,
 ```
 
-- [ ] **Step 4: 运行 scanner 与 CLI 测试**
+- [x] **Step 4: 运行 scanner 与 CLI 测试**
 
 Run: `python -m pytest tests/test_evm_scanner.py tests/test_cli.py -q`
 Expected: PASS。
 
-- [ ] **Step 5: 提交日志批量扫描改动**
+- [x] **Step 5: 提交日志批量扫描改动**
 
 ```bash
 git add usd1_monitor/collectors/evm.py usd1_monitor/cli.py tests/test_evm_scanner.py tests/test_cli.py
@@ -170,7 +170,7 @@ git commit -m "降低EVM日志扫描请求数"
 - Modify: `usd1_monitor/evm_abi.py:35-44,95-172`
 - Modify: `tests/test_evm_decode.py`
 
-- [ ] **Step 1: 写入 Upgraded 和 AdminChanged 解码测试**
+- [x] **Step 1: 写入 Upgraded 和 AdminChanged 解码测试**
 
 ```python
 def test_decodes_upgraded_event() -> None:
@@ -215,12 +215,12 @@ def test_decodes_admin_changed_event() -> None:
     assert event.to_address == current
 ```
 
-- [ ] **Step 2: 运行测试并确认事件当前为 UNKNOWN_LOG**
+- [x] **Step 2: 运行测试并确认事件当前为 UNKNOWN_LOG**
 
 Run: `python -m pytest tests/test_evm_decode.py -q`
 Expected: FAIL，两个事件未登记或未解码。
 
-- [ ] **Step 3: 实现标准事件解码及严格长度校验**
+- [x] **Step 3: 实现标准事件解码及严格长度校验**
 
 ```python
 EVENTS.update({
@@ -254,12 +254,12 @@ if event_name == "AdminChanged":
     )
 ```
 
-- [ ] **Step 4: 运行解码测试并确认通过**
+- [x] **Step 4: 运行解码测试并确认通过**
 
 Run: `python -m pytest tests/test_evm_decode.py -q`
 Expected: PASS。
 
-- [ ] **Step 5: 提交事件解码改动**
+- [x] **Step 5: 提交事件解码改动**
 
 ```bash
 git add usd1_monitor/evm_abi.py tests/test_evm_decode.py
@@ -272,7 +272,7 @@ git commit -m "识别代理升级与管理员变更事件"
 - Modify: `usd1_monitor/collectors/evm.py:46-56,193-321`
 - Modify: `tests/test_evm_snapshot.py`
 
-- [ ] **Step 1: 写入 ProxyAdmin owner 与非 Ownable admin 测试**
+- [x] **Step 1: 写入 ProxyAdmin owner 与非 Ownable admin 测试**
 
 ```python
 @pytest.mark.asyncio
@@ -309,12 +309,12 @@ async def test_snapshot_treats_empty_admin_owner_result_as_unsupported() -> None
     assert snapshot.admin_owner is None
 ```
 
-- [ ] **Step 2: 运行测试并确认快照缺少 admin_owner**
+- [x] **Step 2: 运行测试并确认快照缺少 admin_owner**
 
 Run: `python -m pytest tests/test_evm_snapshot.py -q`
 Expected: FAIL，`EvmSnapshot` 没有 `admin_owner` 或未向 admin 调用 `owner()`。
 
-- [ ] **Step 3: 最小实现可选 owner 读取和观察值**
+- [x] **Step 3: 最小实现可选 owner 读取和观察值**
 
 ```python
 @dataclass(frozen=True)
@@ -352,12 +352,12 @@ Observation(
 )
 ```
 
-- [ ] **Step 4: 运行快照测试并确认通过**
+- [x] **Step 4: 运行快照测试并确认通过**
 
 Run: `python -m pytest tests/test_evm_snapshot.py -q`
 Expected: PASS。
 
-- [ ] **Step 5: 提交 ProxyAdmin owner 快照改动**
+- [x] **Step 5: 提交 ProxyAdmin owner 快照改动**
 
 ```bash
 git add usd1_monitor/collectors/evm.py tests/test_evm_snapshot.py
@@ -374,7 +374,7 @@ git commit -m "监控ProxyAdmin控制权"
 - Modify: `tests/test_evm_integration.py`
 - Modify: `tests/test_wechat.py`
 
-- [ ] **Step 1: 写入 ProxyAdmin owner RED 与事件进入引擎的测试**
+- [x] **Step 1: 写入 ProxyAdmin owner RED 与事件进入引擎的测试**
 
 ```python
 def test_proxy_admin_owner_change_is_red() -> None:
@@ -407,12 +407,12 @@ async def test_monitor_alerts_when_proxy_admin_owner_changes(storage) -> None:
     assert state is not None and state.level is RiskLevel.RED
 ```
 
-- [ ] **Step 2: 运行定向测试并确认缺少风险事实**
+- [x] **Step 2: 运行定向测试并确认缺少风险事实**
 
 Run: `python -m pytest tests/test_evm_rules.py tests/test_evm_integration.py -q`
 Expected: FAIL，`ADMIN_OWNER_CHANGED` 仍为 GREEN 或未生成快照事实。
 
-- [ ] **Step 3: 接入 admin owner 比较及标准事件类型**
+- [x] **Step 3: 接入 admin owner 比较及标准事件类型**
 
 ```python
 RED_IMMUTABLE_FACTS = {
@@ -441,12 +441,12 @@ RED_IMMUTABLE_FACTS = {
 
 对于 `evm.admin_owner`，只有旧观察和新快照都声明 `supported=True` 时才比较；首次建立基线、非 Ownable admin 或接口暂不支持不产生变化事实。
 
-- [ ] **Step 4: 运行规则和 EVM 集成测试**
+- [x] **Step 4: 运行规则和 EVM 集成测试**
 
 Run: `python -m pytest tests/test_evm_rules.py tests/test_evm_integration.py tests/test_wechat.py -q`
 Expected: PASS。
 
-- [ ] **Step 5: 提交风险引擎接线**
+- [x] **Step 5: 提交风险引擎接线**
 
 ```bash
 git add usd1_monitor/engine/evm_rules.py usd1_monitor/scheduler.py usd1_monitor/notifications/wechat.py tests/test_evm_rules.py tests/test_evm_integration.py tests/test_wechat.py
@@ -460,7 +460,7 @@ git commit -m "评估EVM权限快照变化"
 - Modify: `tests/test_cli.py`
 - Modify: `tests/test_evm_integration.py`
 
-- [ ] **Step 1: 写入生产 builder 不创建特权扫描器的测试**
+- [x] **Step 1: 写入生产 builder 不创建特权扫描器的测试**
 
 ```python
 def test_builder_does_not_enable_privileged_block_scanner(config, storage) -> None:
@@ -478,12 +478,12 @@ assert fake_rpc.calls_for("eth_getBlockByNumber") == []
 assert fake_rpc.calls_for("eth_getTransactionReceipt") == []
 ```
 
-- [ ] **Step 2: 运行测试并确认当前 builder 仍注入 collector**
+- [x] **Step 2: 运行测试并确认当前 builder 仍注入 collector**
 
 Run: `python -m pytest tests/test_cli.py tests/test_evm_integration.py -q`
 Expected: FAIL，生产 EVM monitor 的 `_privileged_collector` 不是 `None`。
 
-- [ ] **Step 3: 删除生产 builder 的 collector 导入和注入**
+- [x] **Step 3: 删除生产 builder 的 collector 导入和注入**
 
 ```python
 from usd1_monitor.collectors.evm import EvmScanner, EvmSnapshotReader
@@ -494,12 +494,12 @@ from usd1_monitor.collectors.evm import EvmScanner, EvmSnapshotReader
 
 保留 collector 类本身和 `EvmChainMonitor` 的可选兼容路径，避免在本次成本优化中删除公共接口或扩大重构范围。
 
-- [ ] **Step 4: 运行 CLI 和 EVM 集成测试**
+- [x] **Step 4: 运行 CLI 和 EVM 集成测试**
 
 Run: `python -m pytest tests/test_cli.py tests/test_evm_integration.py -q`
 Expected: PASS，且生产构建路径无完整区块和交易回执调用。
 
-- [ ] **Step 5: 提交生产接线改动**
+- [x] **Step 5: 提交生产接线改动**
 
 ```bash
 git add usd1_monitor/cli.py tests/test_cli.py tests/test_evm_integration.py
@@ -516,7 +516,7 @@ git commit -m "停止生产逐区块权限调用扫描"
 - Modify: `tests/test_evm_integration.py:900-930`
 - Modify: `README.md:18-24`
 
-- [ ] **Step 1: 写入示例配置和启动名称测试**
+- [x] **Step 1: 写入示例配置和启动名称测试**
 
 ```python
 def test_examples_use_ten_minute_permission_monitoring() -> None:
@@ -532,12 +532,12 @@ assert "BNB Chain 合约权限" in message
 assert "链上合约" not in message
 ```
 
-- [ ] **Step 2: 运行测试并确认示例值和文案仍为旧值**
+- [x] **Step 2: 运行测试并确认示例值和文案仍为旧值**
 
 Run: `python -m pytest tests/test_examples.py tests/test_evm_integration.py -q`
 Expected: FAIL，周期仍为 30/15 秒且启动名称仍为“链上合约”。
 
-- [ ] **Step 3: 更新两份示例和启动名称**
+- [x] **Step 3: 更新两份示例和启动名称**
 
 ```yaml
 interval_seconds: 600
@@ -552,12 +552,12 @@ f"{CHAIN_LABELS.get(item.chain, item.chain)} 合约权限"
 
 README 增加现有部署升级命令说明：复制示例值到实际 `config.yaml` 后重启服务；程序不会覆盖用户的实际配置文件。
 
-- [ ] **Step 4: 运行配置示例、文案与 CLI 测试**
+- [x] **Step 4: 运行配置示例、文案与 CLI 测试**
 
 Run: `python -m pytest tests/test_examples.py tests/test_evm_integration.py tests/test_cli.py -q`
 Expected: PASS。
 
-- [ ] **Step 5: 提交部署和文案改动**
+- [x] **Step 5: 提交部署和文案改动**
 
 ```bash
 git add config.example.yaml deploy/config.production.example.yaml usd1_monitor/scheduler.py tests/test_examples.py tests/test_evm_integration.py README.md
@@ -569,7 +569,7 @@ git commit -m "更新EVM权限监控部署参数"
 **Files:**
 - Modify: `docs/superpowers/plans/2026-09-10-evm-permission-monitoring.md`
 
-- [ ] **Step 1: 运行格式和完整测试套件**
+- [x] **Step 1: 运行格式和完整测试套件**
 
 Run: `git diff --check`
 Expected: 无输出，退出码 0。
@@ -577,17 +577,17 @@ Expected: 无输出，退出码 0。
 Run: `python -m pytest -q`
 Expected: 全部测试通过，无失败或错误。
 
-- [ ] **Step 2: 核对生产构建路径的方法集合**
+- [x] **Step 2: 核对生产构建路径的方法集合**
 
 Run: `rg -n "PrivilegedCallCollector|eth_getBlockByNumber|eth_getTransactionReceipt|debug_|trace_" usd1_monitor/cli.py usd1_monitor/scheduler.py`
 Expected: `cli.py` 不包含 `PrivilegedCallCollector`；逐区块方法仅可能存在于未被生产 builder 注入的兼容实现，不在默认执行路径。
 
-- [ ] **Step 3: 核对配置和工作树范围**
+- [x] **Step 3: 核对配置和工作树范围**
 
 Run: `git status --short`
 Expected: 只包含本计划列出的代码、测试、配置、README 和计划勾选修改，不包含多链供应量、网页仪表盘或其他无关改动。
 
-- [ ] **Step 4: 更新本计划勾选状态并提交最终验证记录**
+- [x] **Step 4: 更新本计划勾选状态并提交最终验证记录**
 
 ```bash
 git add docs/superpowers/plans/2026-09-10-evm-permission-monitoring.md
