@@ -189,11 +189,65 @@ class PorConfig(StrictModel):
         return self
 
 
+class MultichainSupplyConfig(StrictModel):
+    tron_rpc_urls: list[str] = Field(
+        default_factory=lambda: [
+            "https://api.trongrid.io",
+            "https://api.tronstack.io",
+        ]
+    )
+    solana_rpc_urls: list[str] = Field(
+        default_factory=lambda: [
+            "https://solana-rpc.publicnode.com",
+            "https://api.mainnet-beta.solana.com",
+        ]
+    )
+    aptos_indexer_urls: list[str] = Field(
+        default_factory=lambda: [
+            "https://api.mainnet.aptoslabs.com/v1/graphql"
+        ]
+    )
+    tempo_rpc_urls: list[str] = Field(
+        default_factory=lambda: ["https://rpc.presto.tempo.xyz"]
+    )
+    plume_rpc_urls: list[str] = Field(
+        default_factory=lambda: ["https://rpc.plume.org"]
+    )
+    ab_rpc_urls: list[str] = Field(
+        default_factory=lambda: ["https://rpc.core.ab.org"]
+    )
+    monad_rpc_urls: list[str] = Field(
+        default_factory=lambda: ["https://rpc.monad.xyz"]
+    )
+    mantle_rpc_urls: list[str] = Field(
+        default_factory=lambda: ["https://rpc.mantle.xyz"]
+    )
+    morph_rpc_urls: list[str] = Field(
+        default_factory=lambda: ["https://rpc.morphl2.io"]
+    )
+
+    @field_validator("*", mode="after")
+    @classmethod
+    def validate_urls(cls, values: list[str]) -> list[str]:
+        if not values:
+            raise ValueError("multichain RPC URL lists must not be empty")
+        for value in values:
+            parts = urlsplit(value)
+            if parts.scheme != "https" or not parts.netloc:
+                raise ValueError(
+                    "multichain RPC URLs must be valid HTTPS URLs"
+                )
+        return values
+
+
 class SupplyConfig(StrictModel):
     interval_seconds: int = Field(default=3600, gt=0)
     defillama_url: str = "https://stablecoins.llama.fi/stablecoins"
     expected_symbol: str = "USD1"
     expected_name: str = "World Liberty Financial USD"
+    multichain: MultichainSupplyConfig = Field(
+        default_factory=MultichainSupplyConfig
+    )
 
     @model_validator(mode="after")
     def validate_identity_and_url(self) -> "SupplyConfig":
@@ -329,6 +383,24 @@ def load_config(
             bsc = ChainConfig.model_validate(
                 {**bsc.model_dump(), "rpc_urls": bsc_urls}
             )
+        multichain_env = {
+            "tron_rpc_urls": "TRON_RPC_URLS",
+            "solana_rpc_urls": "SOLANA_RPC_URLS",
+            "aptos_indexer_urls": "APTOS_INDEXER_URLS",
+            "tempo_rpc_urls": "TEMPO_RPC_URLS",
+            "plume_rpc_urls": "PLUME_RPC_URLS",
+            "ab_rpc_urls": "AB_RPC_URLS",
+            "monad_rpc_urls": "MONAD_RPC_URLS",
+            "mantle_rpc_urls": "MANTLE_RPC_URLS",
+            "morph_rpc_urls": "MORPH_RPC_URLS",
+        }
+        multichain_values = config.supply.multichain.model_dump()
+        for field_name, environment_name in multichain_env.items():
+            urls = _rpc_urls_from_environment(values.get(environment_name))
+            if urls:
+                multichain_values[field_name] = urls
+        multichain = MultichainSupplyConfig.model_validate(multichain_values)
+        supply = config.supply.model_copy(update={"multichain": multichain})
         config_dir = path.resolve().parent
         database_path = config.database_path
         log_path = config.logging.path
@@ -343,6 +415,7 @@ def load_config(
                 "chains": config.chains.model_copy(
                     update={"ethereum": ethereum, "bsc": bsc}
                 ),
+                "supply": supply,
             }
         )
     except ConfigError:
