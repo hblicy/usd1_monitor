@@ -17,8 +17,8 @@ const METRICS = [
   ["exit_usd1usdc_1m", "百万美元退出价（USDC）", "price"],
   ["reserves", "储备金额", "amount"],
   ["multichain_supply", "完整多链供应量", "amount"],
-  ["estimated_collateralization", "估算储备覆盖率", "percent"],
-  ["supply_change_24h", "24 小时供应量变化", "percent"],
+  ["estimated_collateralization", "估算储备覆盖率", "ratio"],
+  ["supply_change_24h", "24 小时供应量变化", "change-percent"],
   ["bridged_total", "桥接发行量", "amount"],
   ["locked_total", "桥锁定量", "amount"],
   ["bridge_delta", "桥接差额", "amount"],
@@ -91,27 +91,35 @@ function renderStatus(kind, data) {
   document.getElementById(`${kind}-message`).textContent = LEVELS[level][kind];
 }
 
+function renderRiskItem(item) {
+  const article = element("article", "risk-item");
+  article.dataset.level = item.level || "YELLOW";
+  article.append(element("span", "risk-dot"));
+  const body = element("div");
+  body.append(element("p", "risk-summary", item.summary || "监控状态发生变化"));
+  body.append(element("small", "", `最近变化：${formatTime(item.changed_at)}`));
+  article.append(body);
+  return article;
+}
+
 function renderActiveRisks(snapshot) {
   const container = document.getElementById("active-risk-list");
   clear(container);
-  const items = [
-    ...(snapshot.business?.items || []),
-    ...(snapshot.health?.items || []),
+  const groups = [
+    ["资产风险", snapshot.business?.items || []],
+    ["数据与监控异常", snapshot.health?.items || []],
   ];
-  if (items.length === 0) {
+  if (groups.every(([, items]) => items.length === 0)) {
     const unknown = snapshot.business?.level === "UNKNOWN" || snapshot.health?.level === "UNKNOWN";
     container.append(element("p", "empty-copy", unknown ? "监控状态尚未完整生成。" : "当前未发现业务风险或监控异常。"));
     return;
   }
-  for (const item of items) {
-    const article = element("article", "risk-item");
-    article.dataset.level = item.level || "YELLOW";
-    article.append(element("span", "risk-dot"));
-    const body = element("div");
-    body.append(element("p", "risk-summary", item.summary || "监控状态发生变化"));
-    body.append(element("small", "", `最近变化：${formatTime(item.changed_at)}`));
-    article.append(body);
-    container.append(article);
+  for (const [title, items] of groups) {
+    if (items.length === 0) continue;
+    const group = element("section", "risk-group");
+    group.append(element("h3", "risk-group-title", title));
+    for (const item of items) group.append(renderRiskItem(item));
+    container.append(group);
   }
 }
 
@@ -120,9 +128,12 @@ function formatMetric(item, kind) {
   if (kind === "price") {
     return new Intl.NumberFormat("zh-CN", { minimumFractionDigits: 4, maximumFractionDigits: 6 }).format(item.value);
   }
-  if (kind === "percent") {
+  if (kind === "ratio") {
     const value = item.unit === "ratio" ? item.value * 100 : item.value;
-    return `${new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 2, signDisplay: "exceptZero" }).format(value)}%`;
+    return `${new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 2 }).format(value)}%`;
+  }
+  if (kind === "change-percent") {
+    return `${new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 2, signDisplay: "exceptZero" }).format(item.value)}%`;
   }
   const value = new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 2 }).format(item.value);
   return item.unit ? `${value} ${item.unit}` : value;
