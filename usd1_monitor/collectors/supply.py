@@ -45,6 +45,18 @@ class SupplySnapshot:
     observation: Observation
 
 
+@dataclass(frozen=True)
+class ComponentBatch:
+    snapshots: tuple[SupplySnapshot, ...]
+    errors: tuple[tuple[str, Exception], ...] = ()
+
+
+class ComponentSource(Protocol):
+    component_ids: frozenset[str]
+
+    async def collect(self, collected_at: datetime) -> ComponentBatch: ...
+
+
 def choose_defillama_asset(assets: list[dict]) -> dict:
     matches = [
         asset
