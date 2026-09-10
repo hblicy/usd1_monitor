@@ -6,6 +6,10 @@ from datetime import UTC, datetime, timedelta
 from usd1_monitor.models import RiskLevel, RiskState
 
 
+def is_monitoring_health_rule(rule_id: str) -> bool:
+    return rule_id.startswith("health.") or rule_id == "por.age"
+
+
 def business_overall(
     states: Iterable[RiskState],
     *,
@@ -17,7 +21,7 @@ def business_overall(
     current = [
         state.level
         for state in states
-        if not state.rule_id.startswith("health.")
+        if not is_monitoring_health_rule(state.rule_id)
         and (
             not state.rule_id.startswith("event.")
             or state.changed_at > event_cutoff
@@ -28,6 +32,8 @@ def business_overall(
 
 def health_overall(states: Iterable[RiskState]) -> RiskLevel:
     current = [
-        state.level for state in states if state.rule_id.startswith("health.")
+        state.level
+        for state in states
+        if is_monitoring_health_rule(state.rule_id)
     ]
     return max(current, default=RiskLevel.GREEN)

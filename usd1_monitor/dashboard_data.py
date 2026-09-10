@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from datetime import UTC, datetime, timedelta
@@ -7,7 +8,11 @@ from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 import aiosqlite
 
-from usd1_monitor.engine.aggregate import business_overall, health_overall
+from usd1_monitor.engine.aggregate import (
+    business_overall,
+    health_overall,
+    is_monitoring_health_rule,
+)
 from usd1_monitor.http import sanitize_url
 from usd1_monitor.models import RiskLevel, RiskState
 from usd1_monitor.time_utils import local_iso
@@ -34,7 +39,10 @@ RULE_LABELS = {
     "health.evm_bsc": "BNB Chain 链上数据获取异常",
     "health.por": "储备数据获取异常",
     "health.supply": "供应量数据获取异常",
+    "health.monitor_stale": "监控数据已经停止更新",
 }
+
+MONITOR_STALE_SECONDS = 900
 
 METRIC_KEYS = {
     ("market.mid_price", "USD1USDT"): "price_usd1usdt",
@@ -124,6 +132,7 @@ class DashboardRepository:
         self.timezone_name = timezone_name
         self.event_active_seconds = event_active_seconds
         self._connection: aiosqlite.Connection | None = None
+        self._snapshot_lock = asyncio.Lock()
 
     @property
     def connection(self) -> aiosqlite.Connection:
@@ -168,29 +177,56 @@ class DashboardRepository:
 
     async def snapshot(self, *, now: datetime | None = None) -> dict[str, object]:
         current_time = now or datetime.now(UTC)
-        connection = self.connection
-        try:
-            await connection.execute("BEGIN")
-            states = await self._risk_states()
-            business = await self._state_group(states, health=False, now=current_time)
-            health = await self._state_group(states, health=True, now=current_time)
-            health["collectors"] = await self._collector_health()
-            result: dict[str, object] = {
-                "generated_at": self._format_time(current_time),
-                "business": business,
-                "health": health,
-                "metrics": await self._metrics(current_time),
-                "recent": {
-                    "alerts": await self._recent_alerts(),
-                    "chain_events": await self._recent_chain_events(),
-                    "announcements": await self._recent_announcements(),
-                },
-            }
-            await connection.commit()
-            return result
-        except (aiosqlite.Error, ValueError) as exc:
-            await connection.rollback()
-            raise DashboardDataError("database snapshot cannot be read") from exc
+        async with self._snapshot_lock:
+            connection = self.connection
+            try:
+                await connection.execute("BEGIN")
+                states = await self._risk_states()
+                business = await self._state_group(
+                    states, health=False, now=current_time
+                )
+                health = await self._state_group(
+                    states, health=True, now=current_time
+                )
+                collectors, last_activity = await self._collector_health()
+                health["collectors"] = collectors
+                if last_activity is not None:
+                    stale_at = last_activity + timedelta(
+                        seconds=MONITOR_STALE_SECONDS
+                    )
+                    if current_time >= stale_at:
+                        health["level"] = RiskLevel.RED.name
+                        items = health["items"]
+                        assert isinstance(items, list)
+                        items.append(
+                            {
+                                "rule_id": "health.monitor_stale",
+                                "level": RiskLevel.RED.name,
+                                "summary": RULE_LABELS["health.monitor_stale"],
+                                "first_triggered_at": self._format_time(stale_at),
+                                "changed_at": self._format_time(stale_at),
+                            }
+                        )
+                result: dict[str, object] = {
+                    "generated_at": self._format_time(current_time),
+                    "business": business,
+                    "health": health,
+                    "metrics": await self._metrics(current_time),
+                    "recent": {
+                        "alerts": await self._recent_alerts(),
+                        "chain_events": await self._recent_chain_events(),
+                        "announcements": await self._recent_announcements(),
+                    },
+                }
+                await connection.commit()
+                return result
+            except BaseException as exc:
+                await connection.rollback()
+                if isinstance(exc, (aiosqlite.Error, ValueError)):
+                    raise DashboardDataError(
+                        "database snapshot cannot be read"
+                    ) from exc
+                raise
 
     async def _risk_states(self) -> list[RiskState]:
         cursor = await self.connection.execute(
@@ -222,7 +258,7 @@ class DashboardRepository:
         selected = [
             state
             for state in states
-            if state.rule_id.startswith("health.") is health
+            if is_monitoring_health_rule(state.rule_id) is health
         ]
         if not selected:
             return {"level": "UNKNOWN", "items": []}
@@ -269,7 +305,9 @@ class DashboardRepository:
         await cursor.close()
         return sanitize_dashboard_text(str(row["content"])) if row is not None else None
 
-    async def _collector_health(self) -> list[dict[str, object]]:
+    async def _collector_health(
+        self,
+    ) -> tuple[list[dict[str, object]], datetime | None]:
         cursor = await self.connection.execute(
             """
             SELECT collector_id, consecutive_failures, last_success_at,
@@ -287,21 +325,45 @@ class DashboardRepository:
             self.path.resolve().as_posix(),
         }
         result: list[dict[str, object]] = []
+        activities: list[datetime] = []
         for row in rows:
             error = str(row["last_error"]) if row["last_error"] else None
             if error is not None:
                 for database_path in database_values:
                     error = error.replace(database_path, "[database]")
+            last_success_at = (
+                datetime.fromisoformat(row["last_success_at"])
+                if row["last_success_at"]
+                else None
+            )
+            last_failure_at = (
+                datetime.fromisoformat(row["last_failure_at"])
+                if row["last_failure_at"]
+                else None
+            )
+            activities.extend(
+                value
+                for value in (last_success_at, last_failure_at)
+                if value is not None
+            )
             result.append(
                 {
                     "collector_id": str(row["collector_id"]),
                     "consecutive_failures": int(row["consecutive_failures"]),
-                    "last_success_at": self._optional_time(row["last_success_at"]),
-                    "last_failure_at": self._optional_time(row["last_failure_at"]),
+                    "last_success_at": (
+                        self._format_time(last_success_at)
+                        if last_success_at is not None
+                        else None
+                    ),
+                    "last_failure_at": (
+                        self._format_time(last_failure_at)
+                        if last_failure_at is not None
+                        else None
+                    ),
                     "last_error": sanitize_dashboard_error(error),
                 }
             )
-        return result
+        return result, max(activities, default=None)
 
     async def _recent_alerts(self) -> list[dict[str, object]]:
         cursor = await self.connection.execute(

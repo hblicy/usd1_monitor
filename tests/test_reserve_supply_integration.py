@@ -587,7 +587,7 @@ async def test_stale_reserves_do_not_emit_estimated_coverage(storage) -> None:
 
 
 @pytest.mark.asyncio
-async def test_por_red_state_needs_two_fresh_reads_to_recover(storage) -> None:
+async def test_por_age_recovers_after_one_fresh_bundle(storage) -> None:
     await storage.set_risk_state("por.age", RiskLevel.RED, NOW, NOW)
     await storage.insert_observation(
         Observation(
@@ -601,7 +601,7 @@ async def test_por_red_state_needs_two_fresh_reads_to_recover(storage) -> None:
 
     await monitor._evaluate_por(NOW + timedelta(minutes=5))
 
-    assert (await storage.get_risk_state("por.age")).level is RiskLevel.RED
+    assert (await storage.get_risk_state("por.age")).level is RiskLevel.GREEN
 
 
 @pytest.mark.asyncio

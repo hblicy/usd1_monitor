@@ -1803,15 +1803,6 @@ class ReserveSupplyMonitor:
         evaluations: list[RuleEvaluation] = []
         source_urls = _observation_source_urls(rows[0])
         if isinstance(result.age_level, RiskLevel):
-            prior_age = await self._storage.get_risk_state("por.age")
-            age_level = result.age_level
-            if (
-                age_level is RiskLevel.GREEN
-                and prior_age is not None
-                and prior_age.level is not RiskLevel.GREEN
-                and not result.valid_recovery
-            ):
-                age_level = prior_age.level
             evidence = {
                 "current": (now - readings[-1].observed_at).total_seconds(),
                 "threshold": self._por_config.yellow_staleness_seconds,
@@ -1822,7 +1813,7 @@ class ReserveSupplyMonitor:
             evaluations.append(
                 RuleEvaluation(
                     "por.age",
-                    age_level,
+                    result.age_level,
                     evidence,
                 )
             )

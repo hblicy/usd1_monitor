@@ -1,3 +1,4 @@
+import asyncio
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -80,6 +81,46 @@ async def test_repository_connection_is_query_only(storage) -> None:
 
 
 @pytest.mark.asyncio
+async def test_snapshot_serializes_concurrent_reads_on_one_connection(storage) -> None:
+    repository = DashboardRepository(storage.path)
+    await repository.open()
+    try:
+        snapshots = await asyncio.gather(
+            *(repository.snapshot(now=NOW) for _ in range(10))
+        )
+    finally:
+        await repository.close()
+
+    assert len(snapshots) == 10
+    assert all(snapshot["generated_at"].endswith("+08:00") for snapshot in snapshots)
+
+
+@pytest.mark.asyncio
+async def test_snapshot_rolls_back_unexpected_error_before_next_read(
+    storage, monkeypatch
+) -> None:
+    repository = DashboardRepository(storage.path)
+    await repository.open()
+    original_metrics = repository._metrics
+    failure = RuntimeError("unexpected metrics failure")
+
+    async def fail_metrics_once(now: datetime):
+        monkeypatch.setattr(repository, "_metrics", original_metrics)
+        raise failure
+
+    monkeypatch.setattr(repository, "_metrics", fail_metrics_once)
+    try:
+        with pytest.raises(RuntimeError) as caught:
+            await repository.snapshot(now=NOW)
+        recovered = await repository.snapshot(now=NOW)
+    finally:
+        await repository.close()
+
+    assert caught.value is failure
+    assert recovered["generated_at"].endswith("+08:00")
+
+
+@pytest.mark.asyncio
 async def test_snapshot_separates_business_and_health_states(storage) -> None:
     await storage.set_risk_state("market.price", RiskLevel.RED, NOW, NOW)
     await storage.set_risk_state("health.evm_bsc", RiskLevel.YELLOW, NOW, NOW)
@@ -115,6 +156,52 @@ async def test_snapshot_reports_unknown_when_no_states_exist(storage) -> None:
 
 
 @pytest.mark.asyncio
+async def test_snapshot_marks_monitor_red_at_collector_stale_boundary(storage) -> None:
+    await storage.record_collector_success("older_success", NOW - timedelta(hours=1))
+    await storage.record_collector_failure("latest_failure", NOW, "timeout")
+    repository = DashboardRepository(storage.path)
+    await repository.open()
+    try:
+        fresh = await repository.snapshot(now=NOW + timedelta(minutes=14, seconds=59))
+        stale = await repository.snapshot(now=NOW + timedelta(minutes=15))
+    finally:
+        await repository.close()
+
+    assert fresh["health"]["level"] == "UNKNOWN"
+    assert fresh["health"]["items"] == []
+    assert stale["generated_at"] == "2026-09-10T16:15:00+08:00"
+    assert stale["health"]["level"] == "RED"
+    assert stale["health"]["items"] == [
+        {
+            "rule_id": "health.monitor_stale",
+            "level": "RED",
+            "summary": "监控数据已经停止更新",
+            "first_triggered_at": "2026-09-10T16:15:00+08:00",
+            "changed_at": "2026-09-10T16:15:00+08:00",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_snapshot_stale_monitor_overrides_persisted_green_health(storage) -> None:
+    await storage.record_collector_success("market", NOW)
+    await storage.set_risk_state("health.por", RiskLevel.GREEN, NOW, NOW)
+    repository = DashboardRepository(storage.path)
+    await repository.open()
+    try:
+        health = (await repository.snapshot(now=NOW + timedelta(minutes=15)))[
+            "health"
+        ]
+    finally:
+        await repository.close()
+
+    assert health["level"] == "RED"
+    assert [item["rule_id"] for item in health["items"]] == [
+        "health.monitor_stale"
+    ]
+
+
+@pytest.mark.asyncio
 async def test_snapshot_uses_alert_text_and_falls_back_to_readable_rule_label(
     storage,
 ) -> None:
@@ -134,9 +221,13 @@ async def test_snapshot_uses_alert_text_and_falls_back_to_readable_rule_label(
     finally:
         await repository.close()
 
-    items = {item["rule_id"]: item for item in snapshot["business"]["items"]}
-    assert items["market.price"]["summary"] == "USD1 价格低于风险阈值"
-    assert items["por.age"]["summary"] == "USD1 储备数据长时间没有更新"
+    business_items = {
+        item["rule_id"]: item for item in snapshot["business"]["items"]
+    }
+    health_items = {item["rule_id"]: item for item in snapshot["health"]["items"]}
+    assert business_items["market.price"]["summary"] == "USD1 价格低于风险阈值"
+    assert "por.age" not in business_items
+    assert health_items["por.age"]["summary"] == "USD1 储备数据长时间没有更新"
 
 
 @pytest.mark.asyncio
@@ -159,9 +250,13 @@ async def test_snapshot_replaces_legacy_technical_alert_with_plain_label(storage
     finally:
         await repository.close()
 
-    items = {item["rule_id"]: item for item in snapshot["business"]["items"]}
-    assert items["por.age"]["summary"] == "USD1 储备数据长时间没有更新"
-    assert items["information.wlfi.attestation"]["summary"] == (
+    business_items = {
+        item["rule_id"]: item for item in snapshot["business"]["items"]
+    }
+    health_items = {item["rule_id"]: item for item in snapshot["health"]["items"]}
+    assert "por.age" not in business_items
+    assert health_items["por.age"]["summary"] == "USD1 储备数据长时间没有更新"
+    assert business_items["information.wlfi.attestation"]["summary"] == (
         "官方信息出现需要关注的变化"
     )
 

@@ -37,3 +37,14 @@ def test_dashboard_assets_include_accessible_responsive_states() -> None:
     assert "720px" in css
     assert ".page-header > div {\n  min-width: 0;" in css
     assert ".risk-item > div {\n  min-width: 0;" in css
+
+
+def test_dashboard_assets_distinguish_ratio_changes_and_risk_groups() -> None:
+    css = (ASSET_ROOT / "dashboard.css").read_text(encoding="utf-8")
+    javascript = (ASSET_ROOT / "dashboard.js").read_text(encoding="utf-8")
+
+    assert '["estimated_collateralization", "估算储备覆盖率", "ratio"]' in javascript
+    assert '["supply_change_24h", "24 小时供应量变化", "change-percent"]' in javascript
+    assert "资产风险" in javascript
+    assert "数据与监控异常" in javascript
+    assert ".risk-group" in css

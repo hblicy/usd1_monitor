@@ -269,6 +269,42 @@ def test_single_health_recovery_does_not_hide_other_health_failure() -> None:
     assert "🟢 USD1 监控已恢复" not in content
 
 
+def test_por_age_red_alert_explains_update_delay() -> None:
+    item = transition("por.age", RiskLevel.GREEN, RiskLevel.RED)
+    item.evidence.update({
+        "current": 128.58028327 * 60,
+        "source_url": "https://www.bitgo.com/resources/proof-of-reserves",
+    })
+
+    content = format_transitions([item])
+
+    assert content.startswith("🔴 USD1 储备数据更新延迟")
+    assert (
+        "发生了什么：官方储备数据已有约 129 分钟未更新\n"
+        "说明：这不代表储备不足，只表示目前无法获得最新储备信息。"
+    ) in content
+    assert "发现时间：2026-09-07 12:30:00（北京时间）" in content
+    assert "https://www.bitgo.com/resources/proof-of-reserves" in content
+    assert "建议：请稍后查看官方储备页面是否恢复更新。" in content
+    assert "USD1 危险" not in content
+    assert "128.58028327" not in content
+
+
+def test_por_age_green_recovery_uses_dedicated_message() -> None:
+    item = transition("por.age", RiskLevel.RED, RiskLevel.GREEN)
+    item.evidence["source_url"] = (
+        "https://www.bitgo.com/resources/proof-of-reserves"
+    )
+
+    content = format_transitions([item])
+
+    assert content.startswith("🟢 USD1 储备数据已恢复更新")
+    assert "发生了什么：USD1 储备数据已恢复更新" in content
+    assert "恢复时间：2026-09-07 12:30:00（北京时间）" in content
+    assert "https://www.bitgo.com/resources/proof-of-reserves" in content
+    assert "建议：继续观察一段时间。" in content
+
+
 def test_bridge_overissue_message_is_plain_chinese() -> None:
     message = format_transitions(
         [
@@ -299,7 +335,6 @@ def test_bridge_overissue_message_is_plain_chinese() -> None:
     ("rule_id", "evidence", "expected"),
     (
         ("market.liquidity", {}, "USD1 市场流动性不足"),
-        ("por.age", {"current": 8000}, "USD1 储备数据长时间没有更新"),
         (
             "supply.estimated_coverage",
             {"current": 98.4},
@@ -419,6 +454,23 @@ async def test_health_alert_uses_monitor_health_not_business_overall(storage) ->
     pending = await storage.pending_alerts()
 
     assert pending[0].content.startswith("🔴 USD1 监控异常")
+    assert "USD1 危险" not in pending[0].content
+
+
+@pytest.mark.asyncio
+async def test_por_age_alert_uses_own_level_when_health_overall_is_red(
+    storage,
+) -> None:
+    await storage.set_risk_state("market.price", RiskLevel.GREEN, NOW, NOW)
+    await storage.set_risk_state("health.por", RiskLevel.RED, NOW, NOW)
+
+    await StateEngine(storage).apply(
+        [RuleEvaluation("por.age", RiskLevel.YELLOW)], NOW
+    )
+
+    pending = await storage.pending_alerts()
+
+    assert pending[0].content.startswith("🟡 USD1 储备数据更新延迟")
     assert "USD1 危险" not in pending[0].content
 
 

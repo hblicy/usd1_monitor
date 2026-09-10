@@ -236,6 +236,17 @@ a:focus-visible {
   padding: 0 18px 16px;
 }
 
+.risk-group {
+  min-width: 0;
+}
+
+.risk-group-title {
+  margin: 0 0 8px;
+  color: var(--text);
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
 .risk-item {
   display: grid;
   grid-template-columns: auto 1fr;
@@ -246,6 +257,11 @@ a:focus-visible {
 }
 
 .risk-item:first-child {
+  padding-top: 0;
+  border-top: 0;
+}
+
+.risk-group .risk-item:nth-child(2) {
   padding-top: 0;
   border-top: 0;
 }

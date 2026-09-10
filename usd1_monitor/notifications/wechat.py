@@ -4,6 +4,7 @@ from collections import defaultdict
 from datetime import datetime
 from typing import Iterable, Protocol
 
+from usd1_monitor.engine.aggregate import is_monitoring_health_rule
 from usd1_monitor.models import RiskLevel, RiskTransition
 from usd1_monitor.time_utils import local_iso
 
@@ -96,8 +97,16 @@ SUPPLY_COMPONENT_LABELS = {
 
 
 def _level_heading(
-    level: RiskLevel, *, recovered: bool, health_only: bool = False
+    level: RiskLevel,
+    *,
+    recovered: bool,
+    health_only: bool = False,
+    por_age_only: bool = False,
 ) -> str:
+    if por_age_only:
+        if recovered:
+            return "🟢 USD1 储备数据已恢复更新"
+        return f"{'🟡' if level is RiskLevel.YELLOW else '🔴'} USD1 储备数据更新延迟"
     if health_only:
         if recovered:
             return "🟢 USD1 监控已恢复"
@@ -288,10 +297,17 @@ def _human_summary(transition: RiskTransition) -> tuple[str, list[str]]:
         return summary, details
 
     if rule_id == "por.age":
-        summary = "USD1 储备数据已恢复更新" if recovered else "USD1 储备数据长时间没有更新"
+        if recovered:
+            return "USD1 储备数据已恢复更新", details
         age = evidence.get("current")
-        if isinstance(age, (int, float)):
-            details.append(f"数据延迟：{_format_number(age / 60)} 分钟")
+        if isinstance(age, (int, float)) and age > 0:
+            minutes = int(age / 60 + 0.5)
+            summary = f"官方储备数据已有约 {minutes} 分钟未更新"
+        else:
+            summary = "官方储备数据暂未更新"
+        details.append(
+            "说明：这不代表储备不足，只表示目前无法获得最新储备信息。"
+        )
         return summary, details
 
     if rule_id == "por.reserve_change":
@@ -431,9 +447,13 @@ class WeChatNotifier:
             )
 
 
-def _advice(level: RiskLevel, *, health_only: bool) -> str:
+def _advice(
+    level: RiskLevel, *, health_only: bool, por_age_only: bool = False
+) -> str:
     if level is RiskLevel.GREEN:
         return "建议：继续观察一段时间。"
+    if por_age_only:
+        return "建议：请稍后查看官方储备页面是否恢复更新。"
     if health_only:
         return "建议：请检查监控服务和数据源是否正常。"
     return "建议：请打开信息来源并人工确认。"
@@ -484,9 +504,12 @@ def format_transitions(
         raise ValueError("at least one transition is required")
 
     transition_level = max(item.current for item in items)
-    health_only = all(item.rule_id.startswith("health.") for item in items)
+    health_only = all(is_monitoring_health_rule(item.rule_id) for item in items)
+    por_age_only = all(item.rule_id == "por.age" for item in items)
     overall = overall_level if overall_level is not None else transition_level
-    display_level = max(overall, transition_level)
+    display_level = (
+        transition_level if por_age_only else max(overall, transition_level)
+    )
     recovered = (
         display_level is RiskLevel.GREEN
         and all(item.current is RiskLevel.GREEN for item in items)
@@ -496,6 +519,7 @@ def format_transitions(
         display_level,
         recovered=recovered,
         health_only=health_only,
+        por_age_only=por_age_only,
     )
 
     grouped: dict[str, list[RiskTransition]] = defaultdict(list)
@@ -510,5 +534,12 @@ def format_transitions(
         if multiple_events:
             lines.append(f"事件 {index}")
         lines.extend(_event_lines(group_items, timezone_name=timezone_name))
-    lines.extend(("", _advice(display_level, health_only=health_only)))
+    lines.extend((
+        "",
+        _advice(
+            display_level,
+            health_only=health_only,
+            por_age_only=por_age_only,
+        ),
+    ))
     return "\n".join(lines)
