@@ -12,7 +12,6 @@ from dotenv import load_dotenv
 from usd1_monitor.collectors.evm import (
     EvmScanner,
     EvmSnapshotReader,
-    PrivilegedCallCollector,
 )
 from usd1_monitor.collectors.announcements import (
     BinanceAnnouncementCollector,
@@ -113,9 +112,6 @@ def build_market_monitor(
                 ),
                 storage,
                 watched_addresses=watched,
-                privileged_collector=PrivilegedCallCollector(
-                    chain_name, rpc, chain_config.token_address
-                ),
                 watched_labels=labels,
                 interval_seconds=chain_config.interval_seconds,
             )
