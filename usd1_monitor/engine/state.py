@@ -6,7 +6,11 @@ from datetime import datetime
 from typing import Iterable
 
 from usd1_monitor.models import RiskLevel, RiskTransition, RuleEvaluation
-from usd1_monitor.engine.aggregate import business_overall, health_overall
+from usd1_monitor.engine.aggregate import (
+    business_overall,
+    health_overall,
+    is_monitoring_health_rule,
+)
 from usd1_monitor.notifications.wechat import format_transitions, split_wechat_text
 from usd1_monitor.storage import Storage
 
@@ -97,7 +101,9 @@ class StateEngine:
         for group_key, group in groups.items():
             overall = (
                 health_level
-                if all(item.rule_id.startswith("health.") for item in group)
+                if all(
+                    is_monitoring_health_rule(item.rule_id) for item in group
+                )
                 else business_level
             )
             content = format_transitions(

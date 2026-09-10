@@ -423,6 +423,20 @@ async def test_health_alert_uses_monitor_health_not_business_overall(storage) ->
 
 
 @pytest.mark.asyncio
+async def test_por_age_alert_uses_monitor_health_overall(storage) -> None:
+    await storage.set_risk_state("market.price", RiskLevel.GREEN, NOW, NOW)
+    await storage.set_risk_state("health.por", RiskLevel.RED, NOW, NOW)
+
+    await StateEngine(storage).apply(
+        [RuleEvaluation("por.age", RiskLevel.YELLOW)], NOW
+    )
+
+    pending = await storage.pending_alerts()
+
+    assert pending[0].content.startswith("🔴")
+
+
+@pytest.mark.asyncio
 async def test_alert_times_use_configured_timezone(tmp_path) -> None:
     storage = Storage(tmp_path / "timezone.db", timezone_name="UTC")
     await storage.open()

@@ -7,7 +7,7 @@ from usd1_monitor.engine.state import StateEngine
 from usd1_monitor.models import RiskLevel, RuleEvaluation
 from usd1_monitor.models import Observation
 from usd1_monitor.scheduler import NOT_MONITORED
-from usd1_monitor.engine.aggregate import business_overall
+from usd1_monitor.engine.aggregate import business_overall, health_overall
 
 
 def test_status_names_every_non_monitored_capability() -> None:
@@ -145,6 +145,25 @@ async def test_status_separates_business_health_and_failed_delivery(
     assert "business_overall: RED" in output
     assert "monitor_health: YELLOW" in output
     assert "failed_alerts: 1" in output
+
+
+@pytest.mark.asyncio
+async def test_por_age_affects_monitor_health_not_business_overall(
+    storage, capsys
+) -> None:
+    now = datetime(2026, 9, 10, tzinfo=UTC)
+    await storage.set_risk_state("market.price", RiskLevel.GREEN, now, now)
+    await storage.set_risk_state("por.age", RiskLevel.RED, now, now)
+
+    states = await storage.list_risk_states()
+    assert business_overall(states, now=now) is RiskLevel.GREEN
+    assert health_overall(states) is RiskLevel.RED
+
+    await _print_status(storage)
+
+    output = capsys.readouterr().out
+    assert "business_overall: GREEN" in output
+    assert "monitor_health: RED" in output
 
 
 @pytest.mark.asyncio

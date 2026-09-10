@@ -48,7 +48,11 @@ from usd1_monitor.scheduler import (
     ReserveSupplyMonitor,
     Usd1Monitor,
 )
-from usd1_monitor.engine.aggregate import business_overall, health_overall
+from usd1_monitor.engine.aggregate import (
+    business_overall,
+    health_overall,
+    is_monitoring_health_rule,
+)
 from usd1_monitor.models import RiskLevel
 from usd1_monitor.time_utils import local_iso
 from usd1_monitor.storage import Storage
@@ -330,10 +334,10 @@ async def _print_status(
 ) -> None:
     states = await storage.list_risk_states()
     business_states = [
-        state for state in states if not state.rule_id.startswith("health.")
+        state for state in states if not is_monitoring_health_rule(state.rule_id)
     ]
     health_states = [
-        state for state in states if state.rule_id.startswith("health.")
+        state for state in states if is_monitoring_health_rule(state.rule_id)
     ]
     failed_alerts = await storage.failed_alerts()
     business_level = (
