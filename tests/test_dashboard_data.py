@@ -4,8 +4,12 @@ from pathlib import Path
 import aiosqlite
 import pytest
 
-from usd1_monitor.dashboard_data import DashboardDataError, DashboardRepository
-from usd1_monitor.models import Observation, RiskLevel
+from usd1_monitor.dashboard_data import (
+    DashboardDataError,
+    DashboardRepository,
+    sanitize_dashboard_text,
+)
+from usd1_monitor.models import Announcement, ChainEvent, Observation, RiskLevel
 
 
 NOW = datetime(2026, 9, 10, 8, 0, tzinfo=UTC)
@@ -106,7 +110,8 @@ async def test_snapshot_reports_unknown_when_no_states_exist(storage) -> None:
         await repository.close()
 
     assert snapshot["business"] == {"level": "UNKNOWN", "items": []}
-    assert snapshot["health"] == {"level": "UNKNOWN", "items": []}
+    assert snapshot["health"]["level"] == "UNKNOWN"
+    assert snapshot["health"]["items"] == []
 
 
 @pytest.mark.asyncio
@@ -261,3 +266,127 @@ async def test_supply_change_24h_requires_recent_positive_baseline(
         assert change["value"] == pytest.approx(expected)
         assert change["unit"] == "percent"
         assert change["quality"] == "CALCULATED"
+
+
+@pytest.mark.asyncio
+async def test_snapshot_sanitizes_collector_errors_and_exposes_health(storage) -> None:
+    error = (
+        "POST https://rpc.example/v3/secret-key?token=hidden failed status=429 "
+        f"database={storage.path.resolve()}"
+    )
+    await storage.record_collector_success("evm_bsc", NOW - timedelta(hours=1))
+    for minute in range(3):
+        await storage.record_collector_failure(
+            "evm_bsc", NOW + timedelta(minutes=minute), error
+        )
+    repository = DashboardRepository(storage.path)
+    await repository.open()
+    try:
+        health = (await repository.snapshot(now=NOW))["health"]
+    finally:
+        await repository.close()
+
+    assert len(health["collectors"]) == 1
+    collector = health["collectors"][0]
+    assert collector["collector_id"] == "evm_bsc"
+    assert collector["consecutive_failures"] == 3
+    assert collector["last_success_at"].endswith("+08:00")
+    assert collector["last_failure_at"].endswith("+08:00")
+    assert "https://rpc.example" in collector["last_error"]
+    assert "status=429" in collector["last_error"]
+    assert "secret-key" not in collector["last_error"]
+    assert "token=hidden" not in collector["last_error"]
+    assert str(storage.path.resolve()) not in collector["last_error"]
+
+
+def test_dashboard_text_keeps_source_path_but_removes_url_secrets() -> None:
+    value = (
+        "来源 https://docs.example/report?id=123&token=hidden#section，请核对"
+    )
+
+    sanitized = sanitize_dashboard_text(value)
+
+    assert "https://docs.example/report" in sanitized
+    assert "?" not in sanitized
+    assert "#section" not in sanitized
+    assert "token=hidden" not in sanitized
+
+
+@pytest.mark.asyncio
+async def test_snapshot_returns_bounded_deduplicated_recent_items(storage) -> None:
+    for index in range(12):
+        created_at = NOW + timedelta(minutes=index)
+        key = f"rule:{index}:market.price:{created_at.isoformat()}"
+        await storage.insert_pending_alert_uncommitted(
+            key,
+            f"hash-{index}",
+            f"告警 {index}",
+            created_at,
+        )
+    chunk_time = NOW + timedelta(minutes=20)
+    for part, content in ((1, "第一部分"), (2, "第二部分")):
+        await storage.insert_pending_alert_uncommitted(
+            f"cause:{chunk_time.isoformat()}:part:{part:03d}",
+            f"chunk-{part}",
+            content,
+            chunk_time,
+        )
+    cancelled_time = NOW + timedelta(minutes=21)
+    await storage.insert_pending_alert_uncommitted(
+        f"cancelled:{cancelled_time.isoformat()}",
+        "cancelled",
+        "不应显示",
+        cancelled_time,
+    )
+    await storage.connection.execute(
+        "UPDATE alert_deliveries SET status = 'CANCELLED' WHERE payload_hash = 'cancelled'"
+    )
+    for index in range(12):
+        event_time = NOW + timedelta(minutes=index)
+        await storage.insert_chain_events_uncommitted(
+            [
+                ChainEvent(
+                    chain="ethereum" if index % 2 == 0 else "bsc",
+                    block_number=1000 + index,
+                    tx_hash=f"0x{index:064x}",
+                    log_index=index,
+                    event_type="Transfer",
+                    payload={"value": index, "ignored": "value"},
+                    observed_at=event_time,
+                )
+            ]
+        )
+        await storage.upsert_announcement_uncommitted(
+            Announcement(
+                source="wlfi",
+                stable_id=f"notice-{index}",
+                title=f"公告 {index}",
+                url=(
+                    f"https://docs.example/notices/{index}?token=hidden"
+                    if index != 11
+                    else "javascript:alert(1)"
+                ),
+                published_at=event_time,
+                body_hash=f"body-{index}",
+                first_seen_at=event_time,
+                metadata={"ignored": "value"},
+            )
+        )
+    await storage.connection.commit()
+    repository = DashboardRepository(storage.path)
+    await repository.open()
+    try:
+        recent = (await repository.snapshot(now=NOW))["recent"]
+    finally:
+        await repository.close()
+
+    assert len(recent["alerts"]) == 10
+    assert recent["alerts"][0]["content"] == "第一部分\n第二部分"
+    assert all(item["content"] != "不应显示" for item in recent["alerts"])
+    assert len(recent["chain_events"]) == 10
+    assert recent["chain_events"][0]["block_number"] == 1011
+    assert recent["chain_events"][0]["url"].startswith("https://bscscan.com/tx/")
+    assert "payload" not in recent["chain_events"][0]
+    assert len(recent["announcements"]) == 10
+    assert recent["announcements"][0]["url"] is None
+    assert recent["announcements"][1]["url"] == "https://docs.example/notices/10"

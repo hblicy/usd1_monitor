@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 import aiosqlite
 
 from usd1_monitor.engine.aggregate import business_overall, health_overall
+from usd1_monitor.http import sanitize_url
 from usd1_monitor.models import RiskLevel, RiskState
 from usd1_monitor.time_utils import local_iso
 
@@ -45,6 +48,61 @@ METRIC_KEYS = {
     ("bridge.locked_total", "global"): "locked_total",
     ("bridge.issuance_delta", "global"): "bridge_delta",
 }
+
+URL_PATTERN = re.compile(r"https?://[^\s<>\"'，。；、]+", re.IGNORECASE)
+ALERT_PART_PATTERN = re.compile(r":part:\d{3}$")
+
+
+def _safe_http_url(value: str, *, preserve_path: bool) -> str | None:
+    try:
+        parts = urlsplit(value)
+        port = parts.port
+    except ValueError:
+        return None
+    scheme = parts.scheme.casefold()
+    if scheme not in {"http", "https"} or not parts.hostname:
+        return None
+    hostname = parts.hostname
+    if ":" in hostname and not hostname.startswith("["):
+        hostname = f"[{hostname}]"
+    netloc = f"{hostname}:{port}" if port is not None else hostname
+    path = parts.path if preserve_path else ""
+    return urlunsplit((scheme, netloc, path, "", ""))
+
+
+def sanitize_dashboard_error(value: str | None) -> str | None:
+    if value is None:
+        return None
+
+    def replace(match: re.Match[str]) -> str:
+        raw = match.group(0).rstrip(")]};,!?")
+        try:
+            return sanitize_url(raw)
+        except ValueError:
+            return "[link]"
+
+    return URL_PATTERN.sub(replace, value)[:300]
+
+
+def sanitize_dashboard_text(value: str | None) -> str | None:
+    if value is None:
+        return None
+
+    def replace(match: re.Match[str]) -> str:
+        raw = match.group(0).rstrip(")]};,!?")
+        return _safe_http_url(raw, preserve_path=True) or "[link]"
+
+    return URL_PATTERN.sub(replace, value)
+
+
+def safe_external_url(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    return _safe_http_url(value, preserve_path=True)
+
+
+def base_alert_key(value: str) -> str:
+    return ALERT_PART_PATTERN.sub("", value)
 
 
 class DashboardDataError(RuntimeError):
@@ -111,11 +169,19 @@ class DashboardRepository:
         try:
             await connection.execute("BEGIN")
             states = await self._risk_states()
+            business = await self._state_group(states, health=False, now=current_time)
+            health = await self._state_group(states, health=True, now=current_time)
+            health["collectors"] = await self._collector_health()
             result: dict[str, object] = {
                 "generated_at": self._format_time(current_time),
-                "business": await self._state_group(states, health=False, now=current_time),
-                "health": await self._state_group(states, health=True, now=current_time),
+                "business": business,
+                "health": health,
                 "metrics": await self._metrics(current_time),
+                "recent": {
+                    "alerts": await self._recent_alerts(),
+                    "chain_events": await self._recent_chain_events(),
+                    "announcements": await self._recent_announcements(),
+                },
             }
             await connection.commit()
             return result
@@ -197,7 +263,147 @@ class DashboardRepository:
         )
         row = await cursor.fetchone()
         await cursor.close()
-        return str(row["content"]) if row is not None else None
+        return sanitize_dashboard_text(str(row["content"])) if row is not None else None
+
+    async def _collector_health(self) -> list[dict[str, object]]:
+        cursor = await self.connection.execute(
+            """
+            SELECT collector_id, consecutive_failures, last_success_at,
+                   last_failure_at, last_error
+            FROM collector_health
+            ORDER BY consecutive_failures DESC, collector_id
+            """
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+        database_values = {
+            str(self.path),
+            str(self.path.resolve()),
+            self.path.as_posix(),
+            self.path.resolve().as_posix(),
+        }
+        result: list[dict[str, object]] = []
+        for row in rows:
+            error = str(row["last_error"]) if row["last_error"] else None
+            if error is not None:
+                for database_path in database_values:
+                    error = error.replace(database_path, "[database]")
+            result.append(
+                {
+                    "collector_id": str(row["collector_id"]),
+                    "consecutive_failures": int(row["consecutive_failures"]),
+                    "last_success_at": self._optional_time(row["last_success_at"]),
+                    "last_failure_at": self._optional_time(row["last_failure_at"]),
+                    "last_error": sanitize_dashboard_error(error),
+                }
+            )
+        return result
+
+    async def _recent_alerts(self) -> list[dict[str, object]]:
+        cursor = await self.connection.execute(
+            """
+            SELECT alert_key, content, created_at, delivered_at, status
+            FROM alert_deliveries
+            WHERE status != 'CANCELLED'
+            ORDER BY created_at DESC, id ASC
+            LIMIT ?
+            """,
+            (20,),
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+        groups: dict[str, dict[str, object]] = {}
+        status_priority = {"FAILED": 4, "IN_FLIGHT": 3, "PENDING": 2, "SENT": 1}
+        for row in rows:
+            key = base_alert_key(str(row["alert_key"]))
+            item = groups.setdefault(
+                key,
+                {
+                    "alert_key": key,
+                    "parts": [],
+                    "created_at": self._format_time(
+                        datetime.fromisoformat(row["created_at"])
+                    ),
+                    "delivered_at": self._optional_time(row["delivered_at"]),
+                    "status": str(row["status"]),
+                },
+            )
+            parts = item["parts"]
+            if isinstance(parts, list):
+                parts.append(str(row["content"]))
+            if status_priority.get(str(row["status"]), 0) > status_priority.get(
+                str(item["status"]), 0
+            ):
+                item["status"] = str(row["status"])
+            if item["delivered_at"] is None:
+                item["delivered_at"] = self._optional_time(row["delivered_at"])
+        result: list[dict[str, object]] = []
+        for item in groups.values():
+            parts = item.pop("parts")
+            item["content"] = sanitize_dashboard_text("\n".join(parts))
+            result.append(item)
+            if len(result) == 10:
+                break
+        return result
+
+    async def _recent_chain_events(self) -> list[dict[str, object]]:
+        cursor = await self.connection.execute(
+            """
+            SELECT chain, block_number, tx_hash, event_type, observed_at
+            FROM chain_events
+            ORDER BY observed_at DESC, id DESC
+            LIMIT ?
+            """,
+            (10,),
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+        explorer_hosts = {
+            "ethereum": "https://etherscan.io/tx/",
+            "bsc": "https://bscscan.com/tx/",
+        }
+        return [
+            {
+                "chain": str(row["chain"]),
+                "block_number": int(row["block_number"]),
+                "tx_hash": str(row["tx_hash"]),
+                "event_type": str(row["event_type"]),
+                "observed_at": self._format_time(
+                    datetime.fromisoformat(row["observed_at"])
+                ),
+                "url": (
+                    f"{explorer_hosts[str(row['chain'])]}{row['tx_hash']}"
+                    if str(row["chain"]) in explorer_hosts
+                    else None
+                ),
+            }
+            for row in rows
+        ]
+
+    async def _recent_announcements(self) -> list[dict[str, object]]:
+        cursor = await self.connection.execute(
+            """
+            SELECT source, title, url, published_at, first_seen_at
+            FROM announcements
+            ORDER BY COALESCE(published_at, first_seen_at) DESC, id DESC
+            LIMIT ?
+            """,
+            (10,),
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+        return [
+            {
+                "source": str(row["source"]),
+                "title": str(row["title"]),
+                "url": safe_external_url(row["url"]),
+                "published_at": self._optional_time(row["published_at"]),
+                "first_seen_at": self._format_time(
+                    datetime.fromisoformat(row["first_seen_at"])
+                ),
+            }
+            for row in rows
+        ]
 
     async def _metrics(self, now: datetime) -> dict[str, object | None]:
         metrics: dict[str, object | None] = {
@@ -305,3 +511,8 @@ class DashboardRepository:
 
     def _format_time(self, value: datetime) -> str:
         return local_iso(value, self.timezone_name)
+
+    def _optional_time(self, value: object) -> str | None:
+        if not value:
+            return None
+        return self._format_time(datetime.fromisoformat(str(value)))
