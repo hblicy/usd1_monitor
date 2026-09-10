@@ -4,6 +4,7 @@ import pytest
 
 from tests.fakes import FakeNotifier, FakePorCollector, FakeSupplyCollector
 from usd1_monitor.collectors.reserves import PorSnapshot
+from usd1_monitor.collectors.supply import SupplySnapshot
 from usd1_monitor.models import Observation, RiskLevel
 from usd1_monitor.config import SupplyConfig
 from usd1_monitor.scheduler import (
@@ -36,57 +37,101 @@ def supply_snapshot(scope: str, value: float, observed_at: datetime):
     return SupplySnapshot(scope, value, observed_at, observation)
 
 
+def por_snapshot_for(reserves: float, observed_at: datetime) -> PorSnapshot:
+    observation = Observation(
+        "por.reserves",
+        "chainlink",
+        "ethereum",
+        reserves,
+        "USD1",
+        observed_at,
+        observed_at,
+    )
+    return PorSnapshot(
+        reserves,
+        int(observed_at.timestamp()),
+        observed_at,
+        observed_at,
+        (observation,),
+    )
+
+
+def aggregate_snapshot(
+    metric: str,
+    value: float,
+    observed_at: datetime = NOW,
+) -> SupplySnapshot:
+    observation = Observation(
+        metric,
+        "onchain_multichain",
+        "global",
+        value,
+        "USD1",
+        observed_at,
+        observed_at,
+    )
+    return SupplySnapshot("global", value, observed_at, observation)
+
+
+def multichain_batch(
+    *,
+    native_total: float,
+    bridged_total: float,
+    locked_total: float,
+    complete: bool,
+    observed_at: datetime = NOW,
+) -> SupplyBatch:
+    totals = (
+        aggregate_snapshot(
+            "supply.multichain_total", native_total, observed_at
+        ),
+        aggregate_snapshot("supply.bridged_total", bridged_total, observed_at),
+        aggregate_snapshot("bridge.locked_total", locked_total, observed_at),
+        aggregate_snapshot(
+            "bridge.issuance_delta",
+            bridged_total - locked_total,
+            observed_at,
+        ),
+    )
+    return SupplyBatch(totals if complete else (), (), complete)
+
+
+def partial_multichain_batch(*failed_ids: str) -> SupplyBatch:
+    component = supply_snapshot("ethereum", 100, NOW)
+    errors = tuple(
+        (component_id, RuntimeError(f"{component_id} unavailable"))
+        for component_id in failed_ids
+    )
+    return SupplyBatch((component,), errors, False)
+
+
 @pytest.mark.asyncio
 async def test_combined_supply_sources_start_concurrently() -> None:
     import asyncio
 
-    ethereum_release = asyncio.Event()
-    later_sources_started = asyncio.Event()
-    started_count = 0
+    global_started = asyncio.Event()
 
-    class Rpc:
-        def __init__(self, blocked: bool = False) -> None:
-            self.blocked = blocked
+    class Multichain:
+        async def collect(self, collected_at):
+            await global_started.wait()
+            from usd1_monitor.collectors.multichain_supply import (
+                MultichainSupplyBatch,
+            )
 
-        async def call(self, method, params):
-            nonlocal started_count
-            started_count += 1
-            if started_count >= 3:
-                later_sources_started.set()
-            if self.blocked:
-                await later_sources_started.wait()
-                ethereum_release.set()
-            return hex(100)
-
-    class Native:
-        def __init__(self, chain: str) -> None:
-            self.chain = chain
-
-        async def collect(self, block, collected_at):
-            return supply_snapshot(self.chain, 100, collected_at)
+            return MultichainSupplyBatch((), (), (), True)
 
     class Global:
         async def collect(self, collected_at):
-            nonlocal started_count
-            started_count += 1
-            if started_count >= 3:
-                later_sources_started.set()
+            global_started.set()
             return supply_snapshot("global", 200, collected_at)
 
-    source = CombinedSupplySource(
-        [
-            (Rpc(blocked=True), Native("ethereum"), 12),
-            (Rpc(), Native("bsc"), 15),
-        ],
-        Global(),
-    )
+    source = CombinedSupplySource(Multichain(), Global())
 
     batch = await asyncio.wait_for(source.collect(NOW), timeout=0.2)
 
-    assert ethereum_release.is_set()
-    assert {item.scope for item in batch.snapshots} == {
-        "ethereum", "bsc", "global"
-    }
+    assert global_started.is_set()
+    assert [item.scope for item in batch.snapshots] == ["global"]
+    assert batch.multichain_complete is True
 
 
 @pytest.mark.asyncio
@@ -139,7 +184,14 @@ async def test_fresh_reserves_and_supply_emit_estimated_coverage(storage) -> Non
     por.queue_snapshot(
         PorSnapshot(4_250_000_000, int(NOW.timestamp()), NOW, NOW, por_observations)
     )
-    supply.queue_global_supply(4_200_000_000)
+    supply.queue_batch(
+        multichain_batch(
+            native_total=4_200_000_000,
+            bridged_total=1_000_000,
+            locked_total=1_000_000,
+            complete=True,
+        )
+    )
     monitor = ReserveSupplyMonitor(por, supply, storage, FakeNotifier())
 
     await monitor.check_once(now=NOW)
@@ -197,22 +249,22 @@ async def test_por_and_coverage_evaluations_include_source_links(storage) -> Non
     )
     await storage.insert_observation(
         Observation(
-            "supply.global",
-            "defillama",
+            "supply.multichain_total",
+            "onchain_multichain",
             "global",
             100,
             "USD1",
             NOW,
             NOW,
             metadata={
-                "source_url": "https://stablecoins.llama.fi/stablecoins?includePrices=true"
+                "source_url": "https://etherscan.io/token/usd1"
             },
         )
     )
     await storage.insert_observation(
         Observation(
             "supply.estimated_collateralization",
-            "por+defillama",
+            "por+onchain_multichain",
             "global",
             99.5,
             "percent",
@@ -231,7 +283,7 @@ async def test_por_and_coverage_evaluations_include_source_links(storage) -> Non
     )
     assert coverage.evidence["source_urls"] == [
         "https://etherscan.io/block/101",
-        "https://stablecoins.llama.fi/stablecoins?includePrices=true",
+        "https://etherscan.io/token/usd1",
     ]
 
 
@@ -254,7 +306,13 @@ async def test_coverage_is_created_when_supply_finishes_before_por(storage) -> N
     class QuickSupply:
         async def collect(self, collected_at):
             supply_collected.set()
-            return (supply_snapshot("global", 100, collected_at),)
+            return multichain_batch(
+                native_total=100,
+                bridged_total=10,
+                locked_total=10,
+                complete=True,
+                observed_at=collected_at,
+            )
 
     monitor = ReserveSupplyMonitor(DelayedPor(), QuickSupply(), storage, None)
     await monitor.check_once(now=NOW)
@@ -279,13 +337,13 @@ async def test_hourly_coverage_waits_for_current_por_after_supply_persists(
     )
     await storage.insert_observation(
         Observation(
-            "supply.global", "defillama", "global", 100,
-            "USD1", previous, previous, quality="ESTIMATED_SOURCE",
+            "supply.multichain_total", "onchain_multichain", "global", 100,
+            "USD1", previous, previous, quality="FACT",
         )
     )
     await storage.insert_observation(
         Observation(
-            "supply.estimated_collateralization", "por+defillama", "global",
+            "supply.estimated_collateralization", "por+onchain_multichain", "global",
             100, "percent", previous, previous, quality="ESTIMATED",
         )
     )
@@ -308,7 +366,13 @@ async def test_hourly_coverage_waits_for_current_por_after_supply_persists(
     class QuickSupply:
         async def collect(self, collected_at):
             supply_collected.set()
-            return (supply_snapshot("global", 100, collected_at),)
+            return multichain_batch(
+                native_total=100,
+                bridged_total=10,
+                locked_total=10,
+                complete=True,
+                observed_at=collected_at,
+            )
 
     monitor = ReserveSupplyMonitor(DelayedPor(), QuickSupply(), storage, None)
     await monitor.check_once(now=current)
@@ -320,7 +384,7 @@ async def test_hourly_coverage_waits_for_current_por_after_supply_persists(
 
 
 @pytest.mark.asyncio
-async def test_same_cycle_inputs_replace_recent_coverage_point(storage) -> None:
+async def test_complete_supply_adds_one_coverage_point(storage) -> None:
     previous = NOW
     recent = NOW + timedelta(minutes=30)
     current = NOW + timedelta(hours=1)
@@ -332,13 +396,13 @@ async def test_same_cycle_inputs_replace_recent_coverage_point(storage) -> None:
     )
     await storage.insert_observation(
         Observation(
-            "supply.global", "defillama", "global", 100,
-            "USD1", previous, previous, quality="ESTIMATED_SOURCE",
+            "supply.multichain_total", "onchain_multichain", "global", 100,
+            "USD1", previous, previous, quality="FACT",
         )
     )
     await storage.insert_observation(
         Observation(
-            "supply.estimated_collateralization", "por+defillama", "global",
+            "supply.estimated_collateralization", "por+onchain_multichain", "global",
             100, "percent", recent, recent, quality="ESTIMATED",
         )
     )
@@ -358,7 +422,13 @@ async def test_same_cycle_inputs_replace_recent_coverage_point(storage) -> None:
 
     class CurrentSupply:
         async def collect(self, collected_at):
-            return (supply_snapshot("global", 200, collected_at),)
+            return multichain_batch(
+                native_total=200,
+                bridged_total=10,
+                locked_total=10,
+                complete=True,
+                observed_at=collected_at,
+            )
 
     monitor = ReserveSupplyMonitor(CurrentPor(), CurrentSupply(), storage, None)
 
@@ -373,8 +443,9 @@ async def test_same_cycle_inputs_replace_recent_coverage_point(storage) -> None:
     ratio_rows = await storage.latest_observations(
         "supply.estimated_collateralization", limit=10
     )
-    assert [item.collected_at for item in ratio_rows] == [current]
-    assert await storage.get_risk_state("supply.estimated_coverage") is None
+    assert [item.collected_at for item in ratio_rows] == [current, recent]
+    state = await storage.get_risk_state("supply.estimated_coverage")
+    assert state is not None and state.level is RiskLevel.YELLOW
 
 
 @pytest.mark.asyncio
@@ -385,7 +456,7 @@ async def test_coverage_gap_does_not_count_as_consecutive_hourly_points(
     await storage.insert_observation(
         Observation(
             "supply.estimated_collateralization",
-            "por+defillama",
+            "por+onchain_multichain",
             "global",
             99.8,
             "percent",
@@ -402,8 +473,8 @@ async def test_coverage_gap_does_not_count_as_consecutive_hourly_points(
     )
     await storage.insert_observation(
         Observation(
-            "supply.global", "defillama", "global", 100,
-            "USD1", NOW, NOW, quality="ESTIMATED_SOURCE",
+            "supply.multichain_total", "onchain_multichain", "global", 100,
+            "USD1", NOW, NOW, quality="FACT",
         )
     )
     monitor = ReserveSupplyMonitor(
@@ -502,7 +573,14 @@ async def test_restart_does_not_create_second_supply_point_within_hour(storage) 
     first_por = FakePorCollector()
     first_por.queue_error(RuntimeError("por offline"))
     first_supply = FakeSupplyCollector()
-    first_supply.queue_global_supply(4_200_000_000)
+    first_supply.queue_batch(
+        multichain_batch(
+            native_total=4_200_000_000,
+            bridged_total=1_000_000,
+            locked_total=1_000_000,
+            complete=True,
+        )
+    )
     await ReserveSupplyMonitor(
         first_por, first_supply, storage, None
     ).check_once(now=NOW)
@@ -510,12 +588,23 @@ async def test_restart_does_not_create_second_supply_point_within_hour(storage) 
     second_por = FakePorCollector()
     second_por.queue_error(RuntimeError("por offline"))
     second_supply = FakeSupplyCollector()
-    second_supply.queue_global_supply(4_100_000_000)
+    second_supply.queue_batch(
+        multichain_batch(
+            native_total=4_100_000_000,
+            bridged_total=1_000_000,
+            locked_total=1_000_000,
+            complete=True,
+            observed_at=NOW + timedelta(minutes=5),
+        )
+    )
     await ReserveSupplyMonitor(
         second_por, second_supply, storage, None
     ).check_once(now=NOW + timedelta(minutes=5))
 
-    rows = await storage.latest_observations("supply.global", limit=10)
+    rows = await storage.latest_observations(
+        "supply.multichain_total",
+        limit=10,
+    )
     assert len(rows) == 1
 
 
@@ -549,10 +638,13 @@ async def test_partial_supply_failure_keeps_other_source_data(storage) -> None:
 @pytest.mark.asyncio
 async def test_native_drop_is_evaluated_when_defillama_fails(storage) -> None:
     baseline = NOW - timedelta(hours=24)
-    for scope in ("ethereum", "bsc"):
-        await storage.insert_observation(
-            supply_snapshot(scope, 100, baseline).observation
-        )
+    await storage.insert_observation(
+        aggregate_snapshot(
+            "supply.multichain_total",
+            200,
+            baseline,
+        ).observation
+    )
     await storage.set_risk_state("market.price", RiskLevel.YELLOW, NOW, NOW)
     await storage.insert_observation(
         Observation(
@@ -561,14 +653,19 @@ async def test_native_drop_is_evaluated_when_defillama_fails(storage) -> None:
         )
     )
 
-    class NativeOnlySupply:
+    class CompleteSupply:
         async def collect(self, collected_at):
+            batch = multichain_batch(
+                native_total=195,
+                bridged_total=10,
+                locked_total=10,
+                complete=True,
+                observed_at=collected_at,
+            )
             return SupplyBatch(
-                (
-                    supply_snapshot("ethereum", 95, collected_at),
-                    supply_snapshot("bsc", 100, collected_at),
-                ),
+                batch.snapshots,
                 (("defillama", RuntimeError("offline")),),
+                True,
             )
 
     class FailedPor:
@@ -576,7 +673,7 @@ async def test_native_drop_is_evaluated_when_defillama_fails(storage) -> None:
             raise RuntimeError("offline")
 
     monitor = ReserveSupplyMonitor(
-        FailedPor(), NativeOnlySupply(), storage, None
+        FailedPor(), CompleteSupply(), storage, None
     )
 
     await monitor.check_once(now=NOW)
@@ -587,23 +684,22 @@ async def test_native_drop_is_evaluated_when_defillama_fails(storage) -> None:
     native_alert = next(
         item for item in pending if "USD1 链上供应量在 24 小时内明显下降" in item.content
     )
-    assert "https://etherscan.io/block/123" in native_alert.content
-    assert "https://bscscan.com/block/123" in native_alert.content
-    assert "来源=未提供" not in native_alert.content
 
 
 @pytest.mark.asyncio
 async def test_native_drop_requires_fresh_value_for_each_chain(storage) -> None:
     baseline = NOW - timedelta(hours=24)
-    for scope in ("ethereum", "bsc"):
-        await storage.insert_observation(
-            supply_snapshot(scope, 100, baseline).observation
-        )
     await storage.insert_observation(
-        supply_snapshot("ethereum", 95, NOW).observation
+        aggregate_snapshot(
+            "supply.multichain_total", 200, baseline
+        ).observation
     )
     await storage.insert_observation(
-        supply_snapshot("bsc", 95, NOW - timedelta(hours=2)).observation
+        aggregate_snapshot(
+            "supply.multichain_total",
+            190,
+            NOW - timedelta(hours=2),
+        ).observation
     )
     monitor = ReserveSupplyMonitor(
         FakePorCollector(), FakeSupplyCollector(), storage, None
@@ -905,7 +1001,7 @@ async def test_supply_observations_roll_back_when_coverage_state_fails(
     )
     await storage.insert_observation(
         Observation(
-            "supply.estimated_collateralization", "por+defillama", "global", 110,
+            "supply.estimated_collateralization", "por+onchain_multichain", "global", 110,
             "percent", NOW - timedelta(hours=1), NOW - timedelta(hours=1),
             quality="ESTIMATED",
         )
@@ -926,7 +1022,14 @@ async def test_supply_observations_roll_back_when_coverage_state_fails(
         )
     )
     supply = FakeSupplyCollector()
-    supply.queue_global_supply(100)
+    supply.queue_batch(
+        multichain_batch(
+            native_total=100,
+            bridged_total=10,
+            locked_total=10,
+            complete=True,
+        )
+    )
     original_apply = StateEngine.apply_uncommitted
 
     async def fail_supply(self, evaluations, now):
@@ -942,4 +1045,152 @@ async def test_supply_observations_roll_back_when_coverage_state_fails(
     ).check_once(now=NOW)
 
     assert result.success is False
-    assert await storage.latest_observation("supply.global", "global") is None
+    assert (
+        await storage.latest_observation(
+            "supply.multichain_total", "global"
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
+async def test_complete_multichain_batch_drives_coverage(storage) -> None:
+    por = FakePorCollector()
+    por.queue_snapshot(por_snapshot_for(4_200, NOW))
+    supply = FakeSupplyCollector()
+    supply.queue_batch(
+        multichain_batch(
+            native_total=4_000,
+            bridged_total=1_000,
+            locked_total=1_000,
+            complete=True,
+        )
+    )
+    monitor = ReserveSupplyMonitor(por, supply, storage, None)
+
+    await monitor.check_once(deliver=False, now=NOW)
+
+    ratio = await storage.latest_observation(
+        "supply.estimated_collateralization",
+        "global",
+    )
+    assert ratio is not None and ratio.value == 105.0
+    assert ratio.source == "por+onchain_multichain"
+
+
+@pytest.mark.asyncio
+async def test_partial_batch_persists_components_without_aggregates_or_risk(
+    storage,
+) -> None:
+    supply = FakeSupplyCollector()
+    supply.queue_batch(partial_multichain_batch("locked_aptos"))
+    monitor = ReserveSupplyMonitor(
+        FakePorCollector(), supply, storage, None
+    )
+
+    await monitor.check_once(deliver=False, now=NOW)
+
+    assert (
+        await storage.latest_observation("supply.native", "ethereum")
+        is not None
+    )
+    assert (
+        await storage.latest_observation(
+            "supply.multichain_total", "global"
+        )
+        is None
+    )
+    assert (
+        await storage.get_risk_state("supply.bridge_reconciliation")
+        is None
+    )
+
+
+@pytest.mark.asyncio
+async def test_por_only_cycle_does_not_duplicate_coverage_point(
+    storage,
+) -> None:
+    por = FakePorCollector()
+    por.queue_snapshot(por_snapshot_for(4_200, NOW))
+    por.queue_snapshot(por_snapshot_for(4_200, NOW + timedelta(minutes=5)))
+    supply = FakeSupplyCollector()
+    supply.queue_batch(
+        multichain_batch(
+            native_total=4_000,
+            bridged_total=1_000,
+            locked_total=1_000,
+            complete=True,
+        )
+    )
+    monitor = ReserveSupplyMonitor(por, supply, storage, None)
+
+    await monitor.check_once(deliver=False, now=NOW)
+    await monitor.check_once(
+        deliver=False,
+        now=NOW + timedelta(minutes=5),
+    )
+
+    rows = await storage.latest_observations(
+        "supply.estimated_collateralization",
+        limit=10,
+    )
+    assert len(rows) == 1
+
+
+@pytest.mark.asyncio
+async def test_restart_due_time_ignores_recent_defillama_only_reading(
+    storage,
+) -> None:
+    await storage.insert_observation(
+        supply_snapshot("global", 4_000, NOW).observation
+    )
+    supply = FakeSupplyCollector()
+    supply.queue_batch(partial_multichain_batch("locked_aptos"))
+    monitor = ReserveSupplyMonitor(
+        FakePorCollector(), supply, storage, None
+    )
+
+    result = await monitor.check_once(
+        deliver=False,
+        now=NOW + timedelta(minutes=1),
+    )
+
+    assert any("locked_aptos" in error for error in result.errors)
+
+
+@pytest.mark.asyncio
+async def test_bridge_evaluation_failure_rolls_back_complete_totals(
+    storage,
+    monkeypatch,
+) -> None:
+    supply = FakeSupplyCollector()
+    supply.queue_batch(
+        multichain_batch(
+            native_total=4_000,
+            bridged_total=1_100,
+            locked_total=1_000,
+            complete=True,
+        )
+    )
+    monitor = ReserveSupplyMonitor(
+        FakePorCollector(), supply, storage, None
+    )
+
+    async def fail_bridge(now: datetime):
+        raise RuntimeError("bridge evaluation failed")
+
+    monkeypatch.setattr(monitor, "_bridge_supply_evaluations", fail_bridge)
+    await monitor.check_once(deliver=False, now=NOW)
+
+    assert (
+        await storage.latest_observation(
+            "supply.multichain_total", "global"
+        )
+        is None
+    )
+    assert (
+        await storage.latest_observation(
+            "bridge.issuance_delta", "global"
+        )
+        is None
+    )

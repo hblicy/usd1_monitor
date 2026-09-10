@@ -22,11 +22,11 @@ from usd1_monitor.collectors.announcements import (
 from usd1_monitor.collectors.reserves import PorCollector, PorSnapshot
 from usd1_monitor.collectors.supply import (
     DefiLlamaSupplyCollector,
-    NativeSupplyCollector,
     SupplyDataError,
     SupplySnapshot,
     estimated_coverage,
 )
+from usd1_monitor.collectors.multichain_supply import MultichainSupplySource
 from usd1_monitor.config import PorConfig, SupplyConfig
 from usd1_monitor.engine.evm_rules import (
     EXPLORER_BASE_URLS,
@@ -43,7 +43,12 @@ from usd1_monitor.engine.reserve_rules import (
     evaluate_por,
     evaluate_reserve_change,
 )
-from usd1_monitor.engine.supply_rules import SupplyRiskInput, evaluate_supply
+from usd1_monitor.engine.supply_rules import (
+    BridgeReading,
+    SupplyRiskInput,
+    evaluate_bridge_reconciliation,
+    evaluate_supply,
+)
 from usd1_monitor.engine.market_rules import MarketSnapshot, evaluate_market
 from usd1_monitor.engine.state import StateEngine
 from usd1_monitor.evm_abi import DecodedEvent
@@ -1362,54 +1367,47 @@ class ConfirmedPorSource:
 class SupplyBatch:
     snapshots: tuple[SupplySnapshot, ...]
     errors: tuple[tuple[str, Exception], ...] = ()
+    multichain_complete: bool = False
 
 
 class CombinedSupplySource:
     def __init__(
         self,
-        native_sources: list[tuple[object, NativeSupplyCollector, int]],
+        multichain_source: MultichainSupplySource,
         global_source: DefiLlamaSupplyCollector,
     ) -> None:
-        self._native_sources = native_sources
-        self._global_source = global_source
+        self._multichain = multichain_source
+        self._global = global_source
 
     async def collect(self, collected_at: datetime) -> SupplyBatch:
-        jobs: list[tuple[str, Awaitable[SupplySnapshot]]] = [
-            (
-                collector.chain,
-                self._collect_native(
-                    rpc, collector, confirmation_depth, collected_at
-                ),
-            )
-            for rpc, collector, confirmation_depth in self._native_sources
-        ]
-        jobs.append(("defillama", self._global_source.collect(collected_at)))
-        results = await asyncio.gather(
-            *(job for _, job in jobs), return_exceptions=True
+        multichain_result, global_result = await asyncio.gather(
+            self._multichain.collect(collected_at),
+            self._global.collect(collected_at),
+            return_exceptions=True,
         )
         snapshots: list[SupplySnapshot] = []
         errors: list[tuple[str, Exception]] = []
-        for (source, _), result in zip(jobs, results, strict=True):
-            if isinstance(result, Exception):
-                errors.append((source, result))
-            elif isinstance(result, BaseException):
-                raise result
-            else:
-                snapshots.append(result)
-        return SupplyBatch(tuple(snapshots), tuple(errors))
-
-    @staticmethod
-    async def _collect_native(
-        rpc: object,
-        collector: NativeSupplyCollector,
-        confirmation_depth: int,
-        collected_at: datetime,
-    ) -> SupplySnapshot:
-        latest = int(await rpc.call("eth_blockNumber", []), 16)  # type: ignore[attr-defined]
-        safe_block = latest - confirmation_depth
-        if safe_block < 0:
-            raise ValueError(f"{collector.chain} has no confirmed supply block")
-        return await collector.collect(safe_block, collected_at)
+        multichain_complete = False
+        if isinstance(multichain_result, Exception):
+            errors.append(("multichain", multichain_result))
+        elif isinstance(multichain_result, BaseException):
+            raise multichain_result
+        else:
+            snapshots.extend(multichain_result.components)
+            snapshots.extend(multichain_result.totals)
+            errors.extend(multichain_result.errors)
+            multichain_complete = multichain_result.complete
+        if isinstance(global_result, Exception):
+            errors.append(("defillama", global_result))
+        elif isinstance(global_result, BaseException):
+            raise global_result
+        else:
+            snapshots.append(global_result)
+        return SupplyBatch(
+            tuple(snapshots),
+            tuple(errors),
+            multichain_complete,
+        )
 
 
 class PorSource(Protocol):
@@ -1458,7 +1456,7 @@ class ReserveSupplyMonitor:
         checked_at = now or datetime.now(UTC)
         if self._last_supply_run is None:
             last_supply = await self._storage.latest_observation(
-                "supply.global", "global"
+                "supply.multichain_total", "global"
             )
             if last_supply is not None:
                 self._last_supply_run = last_supply.collected_at
@@ -1479,13 +1477,10 @@ class ReserveSupplyMonitor:
             por_result = await self._check_por(
                 checked_at,
                 collected=collected[0],
-                update_coverage=False,
             )
             supply_result = await self._check_supply(
                 checked_at,
                 collected=collected[1],
-                update_coverage=por_result.success,
-                force_coverage=por_result.success,
             )
             results = [por_result, supply_result]
         else:
@@ -1506,7 +1501,6 @@ class ReserveSupplyMonitor:
         checked_at: datetime,
         *,
         collected: PorSnapshot | BaseException | object = _NOT_COLLECTED,
-        update_coverage: bool = True,
     ) -> CheckResult:
         try:
             if collected is _NOT_COLLECTED:
@@ -1515,11 +1509,7 @@ class ReserveSupplyMonitor:
                 raise collected
             else:
                 por = collected
-            await self._persist_por(
-                por,
-                checked_at,
-                update_coverage=update_coverage,
-            )
+            await self._persist_por(por, checked_at)
             await _record_health(
                 self._storage, "por", checked_at, success=True, critical=True
             )
@@ -1549,8 +1539,6 @@ class ReserveSupplyMonitor:
         collected: (
             tuple[SupplySnapshot, ...] | SupplyBatch | BaseException | object
         ) = _NOT_COLLECTED,
-        update_coverage: bool = True,
-        force_coverage: bool = False,
     ) -> CheckResult:
         try:
             if collected is _NOT_COLLECTED:
@@ -1582,14 +1570,14 @@ class ReserveSupplyMonitor:
                     )
                     continue
                 valid_supplies.append(supply)
-            batch = SupplyBatch(tuple(valid_supplies), tuple(batch_errors))
-            supplies = batch.snapshots
-            await self._persist_supplies(
-                supplies,
-                checked_at,
-                update_coverage=update_coverage,
-                force_coverage=force_coverage,
+            batch = SupplyBatch(
+                tuple(valid_supplies),
+                tuple(batch_errors),
+                batch.multichain_complete
+                and len(valid_supplies) == len(batch.snapshots),
             )
+            supplies = batch.snapshots
+            await self._persist_supplies(batch, checked_at)
             errors: list[str] = []
             details: list[str] = []
             for supply in supplies:
@@ -1654,8 +1642,6 @@ class ReserveSupplyMonitor:
         self,
         por: PorSnapshot,
         now: datetime,
-        *,
-        update_coverage: bool = True,
     ) -> None:
         connection = self._storage.connection
         async with self._storage.write_lock:
@@ -1664,9 +1650,6 @@ class ReserveSupplyMonitor:
                 for observation in por.observations:
                     await self._storage.insert_observation_uncommitted(observation)
                 evaluations = await self._por_evaluations(now)
-                if update_coverage:
-                    _, coverage_evaluations = await self._coverage_update(now)
-                    evaluations.extend(coverage_evaluations)
                 if evaluations:
                     await StateEngine(self._storage).apply_uncommitted(
                         evaluations, now
@@ -1780,39 +1763,26 @@ class ReserveSupplyMonitor:
 
     async def _persist_supplies(
         self,
-        supplies: tuple[SupplySnapshot, ...],
+        batch: SupplyBatch,
         now: datetime,
-        *,
-        update_coverage: bool = True,
-        force_coverage: bool = False,
     ) -> None:
         connection = self._storage.connection
         async with self._storage.write_lock:
             await connection.execute("BEGIN IMMEDIATE")
             try:
-                for supply in supplies:
+                for supply in batch.snapshots:
                     await self._storage.insert_observation_uncommitted(
                         supply.observation
                     )
-                has_current_global = any(
-                    supply.observation.metric == "supply.global"
-                    and supply.scope == "global"
-                    for supply in supplies
-                )
                 evaluations: list[RuleEvaluation] = []
-                if update_coverage and has_current_global:
-                    _, coverage_evaluations = await self._coverage_update(
-                        now, force=force_coverage
-                    )
+                if batch.multichain_complete:
+                    _, coverage_evaluations = await self._coverage_update(now)
                     evaluations.extend(coverage_evaluations)
-                has_current_native = any(
-                    supply.observation.metric == "supply.native"
-                    and supply.scope in {"ethereum", "bsc"}
-                    for supply in supplies
-                )
-                if has_current_native:
                     evaluations.extend(
                         await self._native_supply_evaluations(now)
+                    )
+                    evaluations.extend(
+                        await self._bridge_supply_evaluations(now)
                     )
                 if evaluations:
                     await StateEngine(self._storage).apply_uncommitted(
@@ -1824,27 +1794,11 @@ class ReserveSupplyMonitor:
                 raise
 
     async def _coverage_update(
-        self, now: datetime, *, force: bool = False
+        self, now: datetime
     ) -> tuple[Observation | None, list[RuleEvaluation]]:
-        latest_ratio = await self._storage.latest_observation(
-            "supply.estimated_collateralization", "global"
-        )
-        replace_latest_ratio = (
-            force
-            and latest_ratio is not None
-            and (now - latest_ratio.collected_at).total_seconds()
-            < self._supply_config.interval_seconds
-        )
-        if (
-            not force
-            and latest_ratio is not None
-            and (now - latest_ratio.collected_at).total_seconds()
-            < self._supply_config.interval_seconds
-        ):
-            return None, []
         reserves = await self._storage.latest_observation("por.reserves", "ethereum")
         global_supply = await self._storage.latest_observation(
-            "supply.global", "global"
+            "supply.multichain_total", "global"
         )
         if (
             reserves is None
@@ -1858,7 +1812,7 @@ class ReserveSupplyMonitor:
         )
         observation = Observation(
             "supply.estimated_collateralization",
-            "por+defillama",
+            "por+onchain_multichain",
             "global",
             coverage.ratio_percent,
             "percent",
@@ -1866,10 +1820,6 @@ class ReserveSupplyMonitor:
             now,
             quality=coverage.quality,
         )
-        if replace_latest_ratio:
-            await self._storage.delete_latest_observation_uncommitted(
-                "supply.estimated_collateralization", "global"
-            )
         await self._storage.insert_observation_uncommitted(observation)
         ratio_rows = await self._storage.latest_observations(
             "supply.estimated_collateralization", limit=2
@@ -1930,6 +1880,61 @@ class ReserveSupplyMonitor:
             )
         return observation, evaluations
 
+    async def _bridge_supply_evaluations(
+        self,
+        now: datetime,
+    ) -> list[RuleEvaluation]:
+        issued_rows = await self._storage.latest_observations(
+            "supply.bridged_total",
+            limit=4,
+        )
+        locked_rows = await self._storage.latest_observations(
+            "bridge.locked_total",
+            limit=4,
+        )
+        issued_by_time = {item.collected_at: item for item in issued_rows}
+        locked_by_time = {item.collected_at: item for item in locked_rows}
+        paired_times = sorted(set(issued_by_time) & set(locked_by_time))[-2:]
+        if not paired_times:
+            return []
+        if len(paired_times) == 2:
+            gap = paired_times[-1] - paired_times[-2]
+            if gap > timedelta(
+                seconds=self._supply_config.interval_seconds * 1.5
+            ):
+                paired_times = paired_times[-1:]
+        readings = [
+            BridgeReading(
+                issued=issued_by_time[item].value,
+                locked=locked_by_time[item].value,
+            )
+            for item in paired_times
+        ]
+        prior = await self._storage.get_risk_state(
+            "supply.bridge_reconciliation"
+        )
+        result = evaluate_bridge_reconciliation(
+            readings,
+            prior.level if prior is not None else RiskLevel.GREEN,
+        )
+        current_time = paired_times[-1]
+        issued = issued_by_time[current_time]
+        locked = locked_by_time[current_time]
+        return [
+            RuleEvaluation(
+                "supply.bridge_reconciliation",
+                result.level,
+                {
+                    "direction": result.direction.value,
+                    "issued": issued.value,
+                    "locked": locked.value,
+                    "difference": result.delta,
+                    "difference_percent": result.ratio_percent,
+                    "data_time": current_time.isoformat(),
+                },
+            )
+        ]
+
     async def _native_supply_evaluations(
         self, now: datetime
     ) -> list[RuleEvaluation]:
@@ -1973,31 +1978,34 @@ class ReserveSupplyMonitor:
         ]
 
     async def _native_drop_24h(self, now: datetime) -> float | None:
-        rows = await self._storage.latest_observations("supply.native", limit=1000)
+        rows = await self._storage.latest_observations(
+            "supply.multichain_total",
+            limit=1000,
+        )
         cutoff = now.timestamp() - 86400
-        current: dict[str, Observation] = {}
-        baseline: dict[str, Observation] = {}
-        for item in rows:
-            current.setdefault(item.scope, item)
-            if item.observed_at.timestamp() <= cutoff:
-                baseline.setdefault(item.scope, item)
-        if set(current) != {"ethereum", "bsc"} or set(baseline) != {
-            "ethereum",
-            "bsc",
-        }:
+        if not rows:
+            return None
+        current = rows[0]
+        baseline = next(
+            (
+                item
+                for item in rows
+                if item.observed_at.timestamp() <= cutoff
+            ),
+            None,
+        )
+        if baseline is None:
             return None
         freshness_seconds = self._supply_config.interval_seconds + 900
         cutoff_time = now - timedelta(days=1)
-        if any(
-            (now - item.observed_at).total_seconds() > freshness_seconds
-            for item in current.values()
-        ) or any(
-            (cutoff_time - item.observed_at).total_seconds() > freshness_seconds
-            for item in baseline.values()
+        if (
+            (now - current.observed_at).total_seconds() > freshness_seconds
+            or (cutoff_time - baseline.observed_at).total_seconds()
+            > freshness_seconds
         ):
             return None
-        before = sum(item.value for item in baseline.values())
-        after = sum(item.value for item in current.values())
+        before = baseline.value
+        after = current.value
         if before <= 0:
             return None
         return max(0.0, (before - after) / before)
