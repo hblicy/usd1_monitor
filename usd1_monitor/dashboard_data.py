@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 import aiosqlite
 
@@ -30,6 +31,19 @@ RULE_LABELS = {
     "health.evm_bsc": "BNB Chain 链上数据获取异常",
     "health.por": "储备数据获取异常",
     "health.supply": "供应量数据获取异常",
+}
+
+METRIC_KEYS = {
+    ("market.mid_price", "USD1USDT"): "price_usd1usdt",
+    ("market.mid_price", "USD1USDC"): "price_usd1usdc",
+    ("market.sell_1000000_terminal_price", "USD1USDT"): "exit_usd1usdt_1m",
+    ("market.sell_1000000_terminal_price", "USD1USDC"): "exit_usd1usdc_1m",
+    ("por.reserves", "ethereum"): "reserves",
+    ("supply.multichain_total", "global"): "multichain_supply",
+    ("supply.estimated_collateralization", "global"): "estimated_collateralization",
+    ("supply.bridged_total", "global"): "bridged_total",
+    ("bridge.locked_total", "global"): "locked_total",
+    ("bridge.issuance_delta", "global"): "bridge_delta",
 }
 
 
@@ -101,6 +115,7 @@ class DashboardRepository:
                 "generated_at": self._format_time(current_time),
                 "business": await self._state_group(states, health=False, now=current_time),
                 "health": await self._state_group(states, health=True, now=current_time),
+                "metrics": await self._metrics(current_time),
             }
             await connection.commit()
             return result
@@ -183,6 +198,95 @@ class DashboardRepository:
         row = await cursor.fetchone()
         await cursor.close()
         return str(row["content"]) if row is not None else None
+
+    async def _metrics(self, now: datetime) -> dict[str, object | None]:
+        metrics: dict[str, object | None] = {
+            key: None for key in (*METRIC_KEYS.values(), "supply_change_24h")
+        }
+        names = tuple(sorted({metric for metric, _ in METRIC_KEYS}))
+        placeholders = ",".join("?" for _ in names)
+        cursor = await self.connection.execute(
+            f"""
+            SELECT metric, scope, value, unit, observed_at, collected_at,
+                   quality, metadata_json
+            FROM (
+                SELECT metric, scope, value, unit, observed_at, collected_at,
+                       quality, metadata_json,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY metric, scope
+                           ORDER BY observed_at DESC, id DESC
+                       ) AS row_number
+                FROM observations
+                WHERE metric IN ({placeholders})
+            )
+            WHERE row_number = 1
+            """,
+            names,
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+        for row in rows:
+            output_key = METRIC_KEYS.get((str(row["metric"]), str(row["scope"])))
+            if output_key is None:
+                continue
+            item: dict[str, object] = {
+                "value": float(row["value"]),
+                "unit": str(row["unit"]),
+                "quality": str(row["quality"]),
+                "observed_at": self._format_time(
+                    datetime.fromisoformat(row["observed_at"])
+                ),
+                "collected_at": self._format_time(
+                    datetime.fromisoformat(row["collected_at"])
+                ),
+            }
+            if output_key.startswith("exit_"):
+                metadata = json.loads(row["metadata_json"])
+                item["fully_fillable"] = bool(metadata.get("fully_fillable", False))
+            metrics[output_key] = item
+        metrics["supply_change_24h"] = await self._supply_change_24h(
+            now, metrics["multichain_supply"]
+        )
+        return metrics
+
+    async def _supply_change_24h(
+        self, now: datetime, current: object | None
+    ) -> dict[str, object] | None:
+        if not isinstance(current, dict):
+            return None
+        current_value = float(current["value"])
+        if current_value <= 0:
+            return None
+        cutoff = now - timedelta(hours=24)
+        cursor = await self.connection.execute(
+            """
+            SELECT value, observed_at
+            FROM observations
+            WHERE metric = 'supply.multichain_total'
+              AND scope = 'global'
+              AND observed_at <= ?
+            ORDER BY observed_at DESC, id DESC
+            LIMIT 1
+            """,
+            (cutoff.isoformat(),),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        if row is None:
+            return None
+        baseline_at = datetime.fromisoformat(row["observed_at"])
+        if cutoff - baseline_at > timedelta(seconds=4500):
+            return None
+        baseline = float(row["value"])
+        if baseline <= 0:
+            return None
+        return {
+            "value": (current_value / baseline - 1) * 100,
+            "unit": "percent",
+            "quality": "CALCULATED",
+            "observed_at": current["observed_at"],
+            "collected_at": current["collected_at"],
+        }
 
     def _rule_label(self, rule_id: str) -> str:
         if rule_id in RULE_LABELS:
