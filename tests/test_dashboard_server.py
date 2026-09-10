@@ -89,6 +89,28 @@ async def test_dashboard_rejects_post_and_sets_security_headers() -> None:
 
 
 @pytest.mark.asyncio
+async def test_dashboard_serves_only_named_static_assets() -> None:
+    app = create_dashboard_app(FakeRepository())
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        expected = {
+            "/": "text/html",
+            "/assets/dashboard.css": "text/css",
+            "/assets/dashboard.js": "text/javascript",
+        }
+        for path, content_type in expected.items():
+            response = await client.get(path)
+            assert response.status == 200
+            assert response.content_type == content_type
+            assert response.headers["Cache-Control"] == "no-store"
+        assert (await client.get("/assets/../config.py")).status == 404
+        assert (await client.get("/assets/unknown.js")).status == 404
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
 async def test_run_dashboard_uses_fixed_host_and_configured_port(
     tmp_path: Path,
 ) -> None:

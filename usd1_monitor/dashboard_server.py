@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any, Protocol
 
 from aiohttp import web
@@ -46,6 +47,8 @@ def _set_security_headers(response: web.StreamResponse) -> None:
 
 
 def create_dashboard_app(repository: SnapshotRepository) -> web.Application:
+    static_root = Path(__file__).with_name("dashboard_static")
+
     async def dashboard_api(request: web.Request) -> web.Response:
         try:
             snapshot = await repository.snapshot()
@@ -65,7 +68,19 @@ def create_dashboard_app(repository: SnapshotRepository) -> web.Application:
     async def healthz(request: web.Request) -> web.Response:
         return web.json_response({"status": "ok"})
 
+    async def index(request: web.Request) -> web.FileResponse:
+        return web.FileResponse(static_root / "index.html")
+
+    async def dashboard_css(request: web.Request) -> web.FileResponse:
+        return web.FileResponse(static_root / "dashboard.css")
+
+    async def dashboard_js(request: web.Request) -> web.FileResponse:
+        return web.FileResponse(static_root / "dashboard.js")
+
     app = web.Application(middlewares=[security_headers])
+    app.router.add_get("/", index)
+    app.router.add_get("/assets/dashboard.css", dashboard_css)
+    app.router.add_get("/assets/dashboard.js", dashboard_js)
     app.router.add_get("/api/dashboard", dashboard_api)
     app.router.add_get("/healthz", healthz)
     return app
