@@ -515,7 +515,7 @@ class EvmChainMonitor:
             if scan.cursor is None:
                 raise ValueError(f"{self.chain} scan produced no cursor")
             processed_head = scan.cursor
-            snapshot = await self._snapshot_reader.read(processed_head, checked_at)
+            snapshot = await self._snapshot_reader.read(scan.safe_head, checked_at)
             candidate_events = list(scan.new_events)
             privileged_events: list[ChainEvent] = []
             block_hashes: dict[int, str] = {}

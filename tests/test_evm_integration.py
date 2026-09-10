@@ -223,7 +223,7 @@ async def test_cold_start_unfrozen_watch_does_not_send_recovery(
 
 
 @pytest.mark.asyncio
-async def test_monitor_commits_only_processed_catch_up_cursor(storage) -> None:
+async def test_monitor_snapshots_safe_head_and_commits_only_processed_cursor(storage) -> None:
     class CapturingReader:
         safe_block = None
 
@@ -242,7 +242,7 @@ async def test_monitor_commits_only_processed_catch_up_cursor(storage) -> None:
     result = await monitor.check_once(deliver=False)
 
     assert result.success is True
-    assert reader.safe_block == 180
+    assert reader.safe_block == 9_997
     assert await storage.get_scan_cursor("ethereum") == 180
 
 
