@@ -12,7 +12,6 @@ from dotenv import load_dotenv
 from usd1_monitor.collectors.evm import (
     EvmScanner,
     EvmSnapshotReader,
-    PrivilegedCallCollector,
 )
 from usd1_monitor.collectors.announcements import (
     BinanceAnnouncementCollector,
@@ -98,6 +97,7 @@ def build_market_monitor(
             confirmation_depth=chain_config.confirmation_depth,
             overlap_blocks=chain_config.overlap_blocks,
             batch_blocks=chain_config.scan_batch_blocks,
+            log_query_chunk_blocks=chain_config.log_query_chunk_blocks,
             token_address=chain_config.token_address,
         )
         evm_chains.append(
@@ -112,9 +112,6 @@ def build_market_monitor(
                 ),
                 storage,
                 watched_addresses=watched,
-                privileged_collector=PrivilegedCallCollector(
-                    chain_name, rpc, chain_config.token_address
-                ),
                 watched_labels=labels,
                 interval_seconds=chain_config.interval_seconds,
             )

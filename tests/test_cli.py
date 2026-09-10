@@ -219,3 +219,20 @@ async def test_default_builder_wires_binance_persistence_providers(
         "expired-neutral",
         "new-neutral",
     }
+
+
+@pytest.mark.asyncio
+async def test_default_builder_does_not_enable_privileged_block_scanner(
+    storage, tmp_path: Path
+) -> None:
+    monitor, http = build_market_monitor(
+        AppConfig(database_path=tmp_path / "unused.db"), storage
+    )
+
+    try:
+        assert all(
+            chain._privileged_collector is None
+            for chain in monitor._evm_chains
+        )
+    finally:
+        await http.close()

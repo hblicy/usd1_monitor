@@ -218,6 +218,28 @@ def test_evm_alert_uses_human_summary_and_hides_internal_fields() -> None:
         assert hidden not in content
 
 
+def test_proxy_admin_owner_alert_uses_human_summary() -> None:
+    event = RiskTransition(
+        rule_id="evm.event.ethereum.snapshot:101:evm.admin_owner",
+        previous=RiskLevel.GREEN,
+        current=RiskLevel.RED,
+        changed_at=NOW,
+        first_triggered_at=NOW,
+        evidence={
+            "fact_type": "ADMIN_OWNER_CHANGED",
+            "chain": "ethereum",
+            "previous": "0x" + "11" * 20,
+            "current": "0x" + "22" * 20,
+            "block": 101,
+        },
+    )
+
+    content = format_transitions([event])
+
+    assert "发生了什么：Ethereum USD1 代理管理员控制人发生变化" in content
+    assert "ADMIN_OWNER_CHANGED" not in content
+
+
 def test_health_alert_is_distinct_from_business_risk() -> None:
     health = RiskTransition(
         rule_id="health.por",

@@ -53,6 +53,7 @@ class EvmSnapshot:
     owner: str | None
     paused: bool | None
     observations: tuple[object, ...]
+    admin_owner: str | None = None
     frozen_accounts: dict[str, bool] = field(default_factory=dict)
 
 
@@ -82,18 +83,22 @@ class EvmScanner:
         confirmation_depth: int,
         overlap_blocks: int,
         batch_blocks: int,
+        log_query_chunk_blocks: int = EVM_LOG_QUERY_CHUNK_BLOCKS,
         token_address: str = USD1_TOKEN_ADDRESS,
     ) -> None:
         if confirmation_depth < 0 or overlap_blocks < 1 or batch_blocks < 1:
             raise ValueError("invalid EVM scanner range configuration")
         if batch_blocks <= overlap_blocks:
             raise ValueError("batch_blocks must be larger than overlap_blocks")
+        if log_query_chunk_blocks < 1:
+            raise ValueError("log_query_chunk_blocks must be positive")
         self.chain = chain
         self._rpc = rpc
         self._storage = storage
         self._confirmation_depth = confirmation_depth
         self._overlap_blocks = overlap_blocks
         self._batch_blocks = batch_blocks
+        self._log_query_chunk_blocks = log_query_chunk_blocks
         self._token_address = token_address
 
     async def scan_once(self) -> ScanResult:
@@ -114,9 +119,11 @@ class EvmScanner:
         start, end = current_range
         end = min(end, start + self._batch_blocks - 1)
         candidate_events: list[ChainEvent] = []
-        for batch_start in range(start, end + 1, EVM_LOG_QUERY_CHUNK_BLOCKS):
+        for batch_start in range(
+            start, end + 1, self._log_query_chunk_blocks
+        ):
             batch_end = min(
-                end, batch_start + EVM_LOG_QUERY_CHUNK_BLOCKS - 1
+                end, batch_start + self._log_query_chunk_blocks - 1
             )
             raw_logs = await self._rpc.call(
                 "eth_getLogs",
@@ -211,7 +218,12 @@ class EvmSnapshotReader:
         except ValueError as exc:
             raise EvmScanError("implementation code must be hex") from exc
 
-        owner = await self._optional_address_call(OWNER_SELECTOR, block_tag)
+        owner = await self._optional_address_call(
+            self._token_address, OWNER_SELECTOR, block_tag
+        )
+        admin_owner = await self._optional_address_call(
+            admin, OWNER_SELECTOR, block_tag
+        )
         paused = await self._optional_bool_call(PAUSED_SELECTOR, block_tag)
         frozen_accounts = {
             address: await self._frozen(address, block_tag)
@@ -223,6 +235,7 @@ class EvmSnapshotReader:
             admin,
             code_hash,
             owner,
+            admin_owner,
             paused,
             collected_at,
         )
@@ -235,6 +248,7 @@ class EvmSnapshotReader:
             owner,
             paused,
             tuple(observations),
+            admin_owner=admin_owner,
             frozen_accounts=frozen_accounts,
         )
 
@@ -246,16 +260,19 @@ class EvmSnapshotReader:
         return self._decode_bool(value, "frozen")
 
     async def _optional_address_call(
-        self, selector: str, block_tag: str
+        self, target: str, selector: str, block_tag: str
     ) -> str | None:
         try:
             value = await self._rpc.call(
                 "eth_call",
-                [{"to": self._token_address, "data": selector}, block_tag],
+                [{"to": target, "data": selector}, block_tag],
             )
         except RpcResponseError:
             return None
-        return self._decode_storage_address(value, "owner")
+        if value == "0x":
+            return None
+        address = self._decode_storage_address(value, "owner")
+        return None if int(address[2:], 16) == 0 else address
 
     async def _optional_bool_call(
         self, selector: str, block_tag: str
@@ -301,6 +318,7 @@ class EvmSnapshotReader:
         admin: str,
         code_hash: str,
         owner: str | None,
+        admin_owner: str | None,
         paused: bool | None,
         collected_at: datetime,
     ) -> list[object]:
@@ -317,6 +335,7 @@ class EvmSnapshotReader:
             Observation("evm.admin", value=1, unit="address", metadata={"address": admin, "block": block_number}, **common),
             Observation("evm.code_hash", value=1, unit="hash", metadata={"hash": code_hash, "block": block_number}, **common),
             Observation("evm.owner", value=1 if owner else 0, unit="address", metadata={"address": owner, "supported": owner is not None, "block": block_number}, **common),
+            Observation("evm.admin_owner", value=1 if admin_owner else 0, unit="address", metadata={"address": admin_owner, "supported": admin_owner is not None, "block": block_number}, **common),
             Observation("evm.paused", value=float(paused) if paused is not None else 0, unit="bool", metadata={"supported": paused is not None, "block": block_number}, **common),
         ]
 

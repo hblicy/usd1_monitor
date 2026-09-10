@@ -86,15 +86,20 @@ class ChainConfig(StrictModel):
     token_address: str = USD1_TOKEN_ADDRESS
     rpc_urls: list[str]
     confirmation_depth: int = Field(ge=0)
-    interval_seconds: int = Field(default=30, ge=5)
+    interval_seconds: int = Field(default=600, ge=5)
     overlap_blocks: int = Field(default=20, ge=1)
-    scan_batch_blocks: int = Field(default=60, gt=0, le=100)
+    scan_batch_blocks: int = Field(default=2_000, gt=0, le=10_000)
+    log_query_chunk_blocks: int = Field(default=500, gt=0, le=2_000)
 
     @model_validator(mode="after")
     def validate_scan_progress(self) -> "ChainConfig":
         if self.scan_batch_blocks <= self.overlap_blocks:
             raise ValueError(
                 "scan_batch_blocks must be larger than overlap_blocks"
+            )
+        if self.log_query_chunk_blocks > self.scan_batch_blocks:
+            raise ValueError(
+                "log_query_chunk_blocks must not exceed scan_batch_blocks"
             )
         return self
 

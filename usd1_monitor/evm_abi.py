@@ -41,6 +41,8 @@ EVENTS = {
     event_topic("Paused(address)"): "Paused",
     event_topic("Unpaused(address)"): "Unpaused",
     event_topic("OwnershipTransferred(address,address)"): "OwnershipTransferred",
+    event_topic("Upgraded(address)"): "Upgraded",
+    event_topic("AdminChanged(address,address)"): "AdminChanged",
 }
 
 
@@ -64,6 +66,16 @@ def _uint(data: object, event_name: str) -> int:
         return int(data, 16)
     except ValueError as exc:
         raise EvmDecodeError(f"malformed {event_name} data") from exc
+
+
+def _data_address(data: object, word: int, event_name: str) -> str:
+    if not isinstance(data, str) or not data.startswith("0x"):
+        raise EvmDecodeError(f"malformed {event_name} data")
+    raw = data[2:]
+    if len(raw) != 128:
+        raise EvmDecodeError(f"malformed {event_name} data")
+    start = word * 64
+    return _address("0x" + raw[start : start + 64], event_name)
 
 
 def decode_log(chain: str, log: object, *, decimals: int) -> DecodedEvent:
@@ -165,6 +177,29 @@ def decode_log(chain: str, log: object, *, decimals: int) -> DecodedEvent:
                 block_number,
                 from_address=_address(topics[1], event_name),
                 to_address=_address(topics[2], event_name),
+            )
+        if event_name == "Upgraded":
+            if len(topics) != 2 or data != "0x":
+                raise EvmDecodeError("malformed Upgraded log")
+            return DecodedEvent(
+                chain,
+                "IMPLEMENTATION_CHANGED",
+                tx_hash,
+                log_index,
+                block_number,
+                to_address=_address(topics[1], event_name),
+            )
+        if event_name == "AdminChanged":
+            if len(topics) != 1:
+                raise EvmDecodeError("malformed AdminChanged topics")
+            return DecodedEvent(
+                chain,
+                "ADMIN_CHANGED",
+                tx_hash,
+                log_index,
+                block_number,
+                from_address=_data_address(data, 0, event_name),
+                to_address=_data_address(data, 1, event_name),
             )
     except EvmDecodeError:
         raise

@@ -8,6 +8,17 @@ def test_implementation_change_is_red() -> None:
     assert evaluate_evm_fact(fact, watched_addresses=set()).level is RiskLevel.RED
 
 
+def test_proxy_admin_owner_change_is_red() -> None:
+    fact = EvmFact(
+        "ethereum",
+        "ADMIN_OWNER_CHANGED",
+        {"previous": "0x" + "11" * 20, "current": "0x" + "22" * 20},
+        "snapshot:123:evm.admin_owner",
+    )
+
+    assert evaluate_evm_fact(fact, watched_addresses=set()).level is RiskLevel.RED
+
+
 def test_watched_freeze_is_red_and_other_freeze_is_yellow() -> None:
     watched = {"0x" + "11" * 20}
     critical = EvmFact(

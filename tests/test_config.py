@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from usd1_monitor.config import ConfigError, load_config
+from usd1_monitor.config import ChainConfig, ConfigError, load_config
 
 
 def test_load_config_reads_market_defaults(tmp_path: Path) -> None:
@@ -142,6 +142,33 @@ chains:
 
     with pytest.raises(ConfigError, match="scan_batch_blocks must be larger"):
         load_config(path, environ={})
+
+
+def test_chain_config_accepts_permission_monitor_scan_sizes() -> None:
+    chain = ChainConfig(
+        chain_id=56,
+        rpc_urls=["https://bsc.example.com"],
+        confirmation_depth=10,
+        interval_seconds=600,
+        overlap_blocks=20,
+        scan_batch_blocks=2_000,
+        log_query_chunk_blocks=500,
+    )
+
+    assert chain.scan_batch_blocks == 2_000
+    assert chain.log_query_chunk_blocks == 500
+
+
+def test_chain_config_rejects_log_chunk_larger_than_scan_batch() -> None:
+    with pytest.raises(ValueError, match="log_query_chunk_blocks"):
+        ChainConfig(
+            chain_id=1,
+            rpc_urls=["https://eth.example.com"],
+            confirmation_depth=3,
+            overlap_blocks=20,
+            scan_batch_blocks=100,
+            log_query_chunk_blocks=101,
+        )
 
 
 def test_chain_poll_intervals_are_independent_from_market(tmp_path: Path) -> None:

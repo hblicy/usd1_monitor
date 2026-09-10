@@ -82,6 +82,7 @@ async def test_snapshot_reads_slots_code_owner_and_pause_at_safe_block() -> None
     rpc.result("eth_getStorageAt", encoded_address(ADMIN))
     rpc.result("eth_getCode", "0x60016000")
     rpc.result("eth_call", encoded_address(OWNER))
+    rpc.result("eth_call", RpcResponseError("admin has no owner"))
     rpc.result("eth_call", "0x" + "00" * 31 + "01")
 
     snapshot = await EvmSnapshotReader("ethereum", rpc, TOKEN).read(100, NOW)
@@ -105,6 +106,7 @@ async def test_snapshot_reads_watched_frozen_state_at_safe_block() -> None:
     rpc.result("eth_getStorageAt", encoded_address(ADMIN))
     rpc.result("eth_getCode", "0x60016000")
     rpc.result("eth_call", encoded_address(OWNER))
+    rpc.result("eth_call", RpcResponseError("admin has no owner"))
     rpc.result("eth_call", "0x" + "00" * 32)
     rpc.result("eth_call", "0x" + "00" * 31 + "01")
 
@@ -127,6 +129,7 @@ async def test_optional_owner_and_paused_reverts_are_unsupported() -> None:
     rpc.result("eth_getStorageAt", encoded_address(ADMIN))
     rpc.result("eth_getCode", "0x6000")
     rpc.result("eth_call", RpcResponseError("owner reverted"))
+    rpc.result("eth_call", RpcResponseError("admin owner reverted"))
     rpc.result("eth_call", RpcResponseError("paused reverted"))
 
     snapshot = await EvmSnapshotReader("bsc", rpc, TOKEN).read(200, NOW)
@@ -136,6 +139,53 @@ async def test_optional_owner_and_paused_reverts_are_unsupported() -> None:
     by_metric = {item.metric: item for item in snapshot.observations}
     assert by_metric["evm.owner"].metadata["supported"] is False
     assert by_metric["evm.paused"].metadata["supported"] is False
+
+
+@pytest.mark.asyncio
+async def test_snapshot_reads_proxy_admin_owner_at_processed_block() -> None:
+    proxy_admin_owner = "0x" + "44" * 20
+    rpc = FakeRpc()
+    rpc.result("eth_getStorageAt", encoded_address(IMPLEMENTATION))
+    rpc.result("eth_getStorageAt", encoded_address(ADMIN))
+    rpc.result("eth_getCode", "0x60016000")
+    rpc.result("eth_call", encoded_address(OWNER))
+    rpc.result("eth_call", encoded_address(proxy_admin_owner))
+    rpc.result("eth_call", "0x" + "00" * 32)
+
+    snapshot = await EvmSnapshotReader("ethereum", rpc, TOKEN).read(123, NOW)
+
+    assert snapshot.admin_owner == proxy_admin_owner
+    observation = next(
+        item
+        for item in snapshot.observations
+        if item.metric == "evm.admin_owner"
+    )
+    assert observation.metadata["address"] == proxy_admin_owner
+    assert rpc.calls_for("eth_call")[1] == [
+        {"to": ADMIN, "data": "0x8da5cb5b"},
+        hex(123),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_snapshot_treats_empty_admin_owner_result_as_unsupported() -> None:
+    rpc = FakeRpc()
+    rpc.result("eth_getStorageAt", encoded_address(IMPLEMENTATION))
+    rpc.result("eth_getStorageAt", encoded_address(ADMIN))
+    rpc.result("eth_getCode", "0x60016000")
+    rpc.result("eth_call", encoded_address(OWNER))
+    rpc.result("eth_call", "0x")
+    rpc.result("eth_call", "0x" + "00" * 32)
+
+    snapshot = await EvmSnapshotReader("ethereum", rpc, TOKEN).read(123, NOW)
+
+    assert snapshot.admin_owner is None
+    observation = next(
+        item
+        for item in snapshot.observations
+        if item.metric == "evm.admin_owner"
+    )
+    assert observation.metadata["supported"] is False
 
 
 @pytest.mark.asyncio

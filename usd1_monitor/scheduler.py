@@ -754,6 +754,7 @@ class EvmChainMonitor:
             "evm.admin",
             "evm.code_hash",
             "evm.owner",
+            "evm.admin_owner",
             "evm.paused",
         ):
             observation = await self._storage.latest_observation(metric, self.chain)
@@ -803,6 +804,31 @@ class EvmChainMonitor:
                                 f"snapshot:{self.chain}:"
                                 f"{snapshot.block_number}:{metric}"
                             )
+                        ),
+                    )
+                )
+        old_admin_owner = previous.get("evm.admin_owner")
+        if (
+            old_admin_owner is not None
+            and bool(old_admin_owner.metadata.get("supported"))  # type: ignore[union-attr]
+            and snapshot.admin_owner is not None
+        ):
+            prior_admin_owner = old_admin_owner.metadata.get("address")  # type: ignore[union-attr]
+            if prior_admin_owner != snapshot.admin_owner:
+                metric = "evm.admin_owner"
+                changes.append(
+                    EvmFact(
+                        self.chain,
+                        "ADMIN_OWNER_CHANGED",
+                        {
+                            "previous": prior_admin_owner,
+                            "current": snapshot.admin_owner,
+                            "block": snapshot.block_number,
+                        },
+                        f"snapshot:{snapshot.block_number}:{metric}",
+                        cause_id=(
+                            f"snapshot:{self.chain}:"
+                            f"{snapshot.block_number}:{metric}"
                         ),
                     )
                 )
@@ -871,6 +897,8 @@ class EvmChainMonitor:
             "PAUSED",
             "UNPAUSED",
             "OWNER_CHANGED",
+            "IMPLEMENTATION_CHANGED",
+            "ADMIN_CHANGED",
             "PRIVILEGED_UNKNOWN_CALL",
         }
         facts = []
@@ -1256,7 +1284,7 @@ class Usd1Monitor:
             return
         monitored = ["价格", "流动性", "交易状态"]
         monitored.extend(
-            f"{CHAIN_LABELS.get(item.chain, item.chain)} 链上合约"
+            f"{CHAIN_LABELS.get(item.chain, item.chain)} 合约权限"
             for item in self._evm_chains
         )
         if self._reserve_supply is not None:

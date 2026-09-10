@@ -69,3 +69,50 @@ def test_malformed_known_log_raises() -> None:
             },
             decimals=18,
         )
+
+
+def test_decodes_upgraded_event() -> None:
+    implementation = "0x" + "11" * 20
+    event = decode_log(
+        "ethereum",
+        {
+            "topics": [
+                event_topic("Upgraded(address)"),
+                "0x" + "00" * 12 + implementation[2:],
+            ],
+            "data": "0x",
+            "transactionHash": "0xupgrade",
+            "logIndex": "0x0",
+            "blockNumber": "0x10",
+        },
+        decimals=18,
+    )
+
+    assert event.event_type == "IMPLEMENTATION_CHANGED"
+    assert event.to_address == implementation
+
+
+def test_decodes_admin_changed_event() -> None:
+    previous = "0x" + "22" * 20
+    current = "0x" + "33" * 20
+    event = decode_log(
+        "ethereum",
+        {
+            "topics": [event_topic("AdminChanged(address,address)")],
+            "data": (
+                "0x"
+                + "00" * 12
+                + previous[2:]
+                + "00" * 12
+                + current[2:]
+            ),
+            "transactionHash": "0xadmin",
+            "logIndex": "0x1",
+            "blockNumber": "0x10",
+        },
+        decimals=18,
+    )
+
+    assert event.event_type == "ADMIN_CHANGED"
+    assert event.from_address == previous
+    assert event.to_address == current

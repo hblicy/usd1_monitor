@@ -50,6 +50,7 @@ FACT_LABELS = {
     "UNFREEZE": "地址已被 USD1 合约解除冻结",
     "IMPLEMENTATION_CHANGED": "USD1 实现合约发生变化",
     "ADMIN_CHANGED": "USD1 管理员地址发生变化",
+    "ADMIN_OWNER_CHANGED": "USD1 代理管理员控制人发生变化",
     "CODE_HASH_CHANGED": "USD1 合约代码发生变化",
     "OWNER_CHANGED": "USD1 所有者地址发生变化",
     "PRIVILEGED_UNKNOWN_CALL": "检测到未知的高权限合约调用",
