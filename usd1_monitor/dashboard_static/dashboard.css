@@ -74,6 +74,10 @@ a:focus-visible {
   margin-bottom: 24px;
 }
 
+.page-header > div {
+  min-width: 0;
+}
+
 .page-header h1 {
   margin: 0;
   font-size: clamp(28px, 3vw, 36px);
@@ -244,6 +248,10 @@ a:focus-visible {
 .risk-item:first-child {
   padding-top: 0;
   border-top: 0;
+}
+
+.risk-item > div {
+  min-width: 0;
 }
 
 .risk-item p,
@@ -456,6 +464,10 @@ a:focus-visible {
 }
 
 @media (max-width: 720px) {
+  body {
+    overflow-x: hidden;
+  }
+
   .page-shell {
     width: min(100% - 32px, 620px);
     padding: 22px 0 36px;
@@ -469,6 +481,7 @@ a:focus-visible {
 
   .page-header h1 {
     font-size: 27px;
+    white-space: nowrap;
   }
 
   .last-updated {

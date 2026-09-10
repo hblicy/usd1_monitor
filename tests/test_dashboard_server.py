@@ -1,16 +1,19 @@
 import asyncio
+import hashlib
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
 from usd1_monitor.config import AppConfig
-from usd1_monitor.dashboard_data import DashboardDataError
+from usd1_monitor.dashboard_data import DashboardDataError, DashboardRepository
 from usd1_monitor.dashboard_server import (
     DASHBOARD_HOST,
     create_dashboard_app,
     run_dashboard,
 )
+from usd1_monitor.models import Observation, RiskLevel
 
 
 SNAPSHOT = {
@@ -104,6 +107,7 @@ async def test_dashboard_serves_only_named_static_assets() -> None:
             assert response.status == 200
             assert response.content_type == content_type
             assert response.headers["Cache-Control"] == "no-store"
+        assert (await client.get("/favicon.ico")).status == 204
         assert (await client.get("/assets/../config.py")).status == 404
         assert (await client.get("/assets/unknown.js")).status == 404
     finally:
@@ -170,3 +174,43 @@ async def test_run_dashboard_uses_fixed_host_and_configured_port(
     assert captured["started"] is True
     assert captured["cleanup"] is True
     assert captured["closed"] is True
+
+
+@pytest.mark.asyncio
+async def test_dashboard_http_reads_existing_database_without_mutation(
+    storage,
+) -> None:
+    now = datetime(2026, 9, 10, 8, 0, tzinfo=UTC)
+    await storage.set_risk_state("market.price", RiskLevel.YELLOW, now, now)
+    await storage.set_risk_state("health.por", RiskLevel.GREEN, now, now)
+    await storage.insert_observation(
+        Observation(
+            "market.mid_price",
+            "binance",
+            "USD1USDT",
+            0.998,
+            "USDT",
+            now,
+            now,
+        )
+    )
+    database_path = storage.path
+    await storage.close()
+    before = hashlib.sha256(database_path.read_bytes()).hexdigest()
+    repository = DashboardRepository(database_path)
+    await repository.open()
+    client = TestClient(TestServer(create_dashboard_app(repository)))
+    await client.start_server()
+    try:
+        response = await client.get("/api/dashboard")
+        payload = await response.json()
+        assert response.status == 200
+        assert payload["business"]["level"] == "YELLOW"
+        assert payload["health"]["level"] == "GREEN"
+        assert payload["metrics"]["price_usd1usdt"]["value"] == 0.998
+    finally:
+        await client.close()
+        await repository.close()
+
+    after = hashlib.sha256(database_path.read_bytes()).hexdigest()
+    assert after == before

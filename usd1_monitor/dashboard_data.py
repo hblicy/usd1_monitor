@@ -51,6 +51,9 @@ METRIC_KEYS = {
 
 URL_PATTERN = re.compile(r"https?://[^\s<>\"'，。；、]+", re.IGNORECASE)
 ALERT_PART_PATTERN = re.compile(r":part:\d{3}$")
+LEGACY_RULE_PATTERN = re.compile(
+    r"(?:^|\n)-\s+([^\s:]+):\s+当前值=", re.IGNORECASE
+)
 
 
 def _safe_http_url(value: str, *, preserve_path: bool) -> str | None:
@@ -243,7 +246,8 @@ class DashboardRepository:
         return {
             "rule_id": state.rule_id,
             "level": state.level.name,
-            "summary": summary or self._rule_label(state.rule_id),
+            "summary": self._plain_alert_content(summary)
+            or self._rule_label(state.rule_id),
             "first_triggered_at": self._format_time(state.first_triggered_at),
             "changed_at": self._format_time(state.changed_at),
         }
@@ -255,11 +259,11 @@ class DashboardRepository:
             FROM alert_deliveries
             WHERE created_at = ?
               AND status != 'CANCELLED'
-              AND alert_key LIKE ?
+              AND instr(alert_key, ?) > 0
             ORDER BY id
             LIMIT 1
             """,
-            (state.changed_at.isoformat(), f"%:{state.rule_id}:%"),
+            (state.changed_at.isoformat(), f":{state.rule_id}:"),
         )
         row = await cursor.fetchone()
         await cursor.close()
@@ -340,7 +344,8 @@ class DashboardRepository:
         result: list[dict[str, object]] = []
         for item in groups.values():
             parts = item.pop("parts")
-            item["content"] = sanitize_dashboard_text("\n".join(parts))
+            content = sanitize_dashboard_text("\n".join(parts))
+            item["content"] = self._plain_alert_content(content)
             result.append(item)
             if len(result) == 10:
                 break
@@ -409,31 +414,21 @@ class DashboardRepository:
         metrics: dict[str, object | None] = {
             key: None for key in (*METRIC_KEYS.values(), "supply_change_24h")
         }
-        names = tuple(sorted({metric for metric, _ in METRIC_KEYS}))
-        placeholders = ",".join("?" for _ in names)
-        cursor = await self.connection.execute(
-            f"""
-            SELECT metric, scope, value, unit, observed_at, collected_at,
-                   quality, metadata_json
-            FROM (
+        for (metric, scope), output_key in METRIC_KEYS.items():
+            cursor = await self.connection.execute(
+                """
                 SELECT metric, scope, value, unit, observed_at, collected_at,
-                       quality, metadata_json,
-                       ROW_NUMBER() OVER (
-                           PARTITION BY metric, scope
-                           ORDER BY observed_at DESC, id DESC
-                       ) AS row_number
+                       quality, metadata_json
                 FROM observations
-                WHERE metric IN ({placeholders})
+                WHERE metric = ? AND scope = ?
+                ORDER BY observed_at DESC, id DESC
+                LIMIT 1
+                """,
+                (metric, scope),
             )
-            WHERE row_number = 1
-            """,
-            names,
-        )
-        rows = await cursor.fetchall()
-        await cursor.close()
-        for row in rows:
-            output_key = METRIC_KEYS.get((str(row["metric"]), str(row["scope"])))
-            if output_key is None:
+            row = await cursor.fetchone()
+            await cursor.close()
+            if row is None:
                 continue
             item: dict[str, object] = {
                 "value": float(row["value"]),
@@ -454,6 +449,16 @@ class DashboardRepository:
             now, metrics["multichain_supply"]
         )
         return metrics
+
+    def _plain_alert_content(self, content: str | None) -> str | None:
+        if content is None or not ("当前值=" in content and "阈值=" in content):
+            return content
+        labels: list[str] = []
+        for rule_id in LEGACY_RULE_PATTERN.findall(content):
+            label = self._rule_label(rule_id)
+            if label not in labels:
+                labels.append(label)
+        return "；".join(labels) if labels else "监控状态发生变化"
 
     async def _supply_change_24h(
         self, now: datetime, current: object | None
@@ -498,10 +503,13 @@ class DashboardRepository:
         if rule_id in RULE_LABELS:
             return RULE_LABELS[rule_id]
         prefixes = (
+            ("expiry.event.information.", "官方信息提醒已结束"),
+            ("event.information.", "官方信息出现需要关注的变化"),
             ("market.", "USD1 市场指标发生变化"),
             ("por.", "USD1 储备指标发生变化"),
             ("supply.", "USD1 供应量指标发生变化"),
             ("evm.", "USD1 链上合约状态发生变化"),
+            ("information.", "官方信息出现需要关注的变化"),
             ("health.", "监控数据源发生异常"),
         )
         for prefix, label in prefixes:

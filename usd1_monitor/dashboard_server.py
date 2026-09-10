@@ -77,10 +77,14 @@ def create_dashboard_app(repository: SnapshotRepository) -> web.Application:
     async def dashboard_js(request: web.Request) -> web.FileResponse:
         return web.FileResponse(static_root / "dashboard.js")
 
+    async def favicon(request: web.Request) -> web.Response:
+        return web.Response(status=204)
+
     app = web.Application(middlewares=[security_headers])
     app.router.add_get("/", index)
     app.router.add_get("/assets/dashboard.css", dashboard_css)
     app.router.add_get("/assets/dashboard.js", dashboard_js)
+    app.router.add_get("/favicon.ico", favicon)
     app.router.add_get("/api/dashboard", dashboard_api)
     app.router.add_get("/healthz", healthz)
     return app

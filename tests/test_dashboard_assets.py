@@ -35,4 +35,5 @@ def test_dashboard_assets_include_accessible_responsive_states() -> None:
     assert ':focus-visible' in css
     assert 'prefers-reduced-motion: reduce' in css
     assert "720px" in css
-
+    assert ".page-header > div {\n  min-width: 0;" in css
+    assert ".risk-item > div {\n  min-width: 0;" in css

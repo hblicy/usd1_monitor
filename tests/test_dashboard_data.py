@@ -140,6 +140,79 @@ async def test_snapshot_uses_alert_text_and_falls_back_to_readable_rule_label(
 
 
 @pytest.mark.asyncio
+async def test_snapshot_replaces_legacy_technical_alert_with_plain_label(storage) -> None:
+    await storage.set_risk_state("por.age", RiskLevel.RED, NOW, NOW)
+    await storage.set_risk_state(
+        "information.wlfi.attestation", RiskLevel.YELLOW, NOW, NOW
+    )
+    await storage.insert_pending_alert_uncommitted(
+        f"rule:0:por.age:{NOW.isoformat()}",
+        "legacy",
+        "USD1 风险状态：RED\n- por.age: 当前值=48190; 阈值=3600",
+        NOW,
+    )
+    await storage.connection.commit()
+    repository = DashboardRepository(storage.path)
+    await repository.open()
+    try:
+        snapshot = await repository.snapshot(now=NOW)
+    finally:
+        await repository.close()
+
+    items = {item["rule_id"]: item for item in snapshot["business"]["items"]}
+    assert items["por.age"]["summary"] == "USD1 储备数据长时间没有更新"
+    assert items["information.wlfi.attestation"]["summary"] == (
+        "官方信息出现需要关注的变化"
+    )
+
+
+@pytest.mark.asyncio
+async def test_snapshot_matches_rule_ids_literally_in_alert_keys(storage) -> None:
+    await storage.set_risk_state("health.evm_bsc", RiskLevel.YELLOW, NOW, NOW)
+    await storage.insert_pending_alert_uncommitted(
+        f"rule:0:health.evmXbsc:{NOW.isoformat()}",
+        "wrong-rule",
+        "不应匹配其他规则",
+        NOW,
+    )
+    await storage.connection.commit()
+    repository = DashboardRepository(storage.path)
+    await repository.open()
+    try:
+        snapshot = await repository.snapshot(now=NOW)
+    finally:
+        await repository.close()
+
+    assert snapshot["health"]["items"][0]["summary"] == (
+        "BNB Chain 链上数据获取异常"
+    )
+
+
+@pytest.mark.asyncio
+async def test_recent_alert_replaces_legacy_technical_content(storage) -> None:
+    rule_id = "event.information.wlfi./usd1-token/attestation"
+    await storage.insert_pending_alert_uncommitted(
+        f"rule:0:{rule_id}:{NOW.isoformat()}",
+        "legacy-recent",
+        (
+            "USD1 风险状态：YELLOW\n"
+            f"- {rule_id}: 当前值=CHANGED; "
+            "阈值=official risk keyword"
+        ),
+        NOW,
+    )
+    await storage.connection.commit()
+    repository = DashboardRepository(storage.path)
+    await repository.open()
+    try:
+        recent = (await repository.snapshot(now=NOW))["recent"]
+    finally:
+        await repository.close()
+
+    assert recent["alerts"][0]["content"] == "官方信息出现需要关注的变化"
+
+
+@pytest.mark.asyncio
 async def test_snapshot_returns_latest_core_metrics(storage) -> None:
     metric_rows = (
         ("market.mid_price", "USD1USDT", 0.999, "USDT", {}),
