@@ -65,6 +65,21 @@ supply:
   defillama_url: https://stablecoins.llama.fi/stablecoins
   expected_symbol: USD1
   expected_name: World Liberty Financial USD
+  multichain:
+    tron_rpc_urls:
+      - https://api.trongrid.io
+      - https://api.tronstack.io
+    solana_rpc_urls:
+      - https://solana-rpc.publicnode.com
+      - https://api.mainnet-beta.solana.com
+    aptos_indexer_urls:
+      - https://api.mainnet.aptoslabs.com/v1/graphql
+    tempo_rpc_urls: [https://rpc.presto.tempo.xyz]
+    plume_rpc_urls: [https://rpc.plume.org]
+    ab_rpc_urls: [https://rpc.core.ab.org]
+    monad_rpc_urls: [https://rpc.monad.xyz]
+    mantle_rpc_urls: [https://rpc.mantle.xyz]
+    morph_rpc_urls: [https://rpc.morphl2.io]
 information:
   binance:
     url: https://www.binance.com/bapi/apex/v1/public/apex/cms/article/list/query

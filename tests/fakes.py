@@ -82,10 +82,15 @@ class FakeSupplyCollector:
     def queue_global_supply(self, value: float) -> None:
         self.values.append(value)
 
+    def queue_batch(self, batch: object) -> None:
+        self.values.append(batch)
+
     async def collect(self, collected_at):
         value = self.values.pop(0)
         if isinstance(value, Exception):
             raise value
+        if not isinstance(value, (int, float)):
+            return value
         from usd1_monitor.collectors.supply import SupplySnapshot
         from usd1_monitor.models import Observation
 

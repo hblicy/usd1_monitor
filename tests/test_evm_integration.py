@@ -223,7 +223,7 @@ async def test_cold_start_unfrozen_watch_does_not_send_recovery(
 
 
 @pytest.mark.asyncio
-async def test_monitor_commits_only_processed_catch_up_cursor(storage) -> None:
+async def test_monitor_snapshots_safe_head_and_commits_only_processed_cursor(storage) -> None:
     class CapturingReader:
         safe_block = None
 
@@ -242,7 +242,7 @@ async def test_monitor_commits_only_processed_catch_up_cursor(storage) -> None:
     result = await monitor.check_once(deliver=False)
 
     assert result.success is True
-    assert reader.safe_block == 180
+    assert reader.safe_block == 9_997
     assert await storage.get_scan_cursor("ethereum") == 180
 
 
@@ -1012,6 +1012,8 @@ async def test_composite_startup_notification_uses_plain_chinese(storage) -> Non
     assert "BNB Chain 合约权限" in message
     assert "链上合约" not in message
     assert "储备与供应量" in message
+    assert "完整多链供应量与桥接核对" in message
+    assert "暂未覆盖：\n完整多链供应量核对" not in message
     assert "官方公告" in message
     for hidden in ("enabled_collectors", "NOT_MONITORED", "evm_bsc"):
         assert hidden not in message

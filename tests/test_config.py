@@ -111,6 +111,45 @@ def test_load_config_reads_rpc_urls_from_environment(tmp_path: Path) -> None:
     assert config.chains.bsc.rpc_urls == ["https://bsc.example"]
 
 
+def test_old_config_gets_multichain_public_defaults(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text("database_path: monitor.db\n", encoding="utf-8")
+
+    config = load_config(path, environ={})
+
+    assert config.supply.multichain.tempo_rpc_urls == [
+        "https://rpc.presto.tempo.xyz"
+    ]
+    assert config.supply.multichain.aptos_indexer_urls == [
+        "https://api.mainnet.aptoslabs.com/v1/graphql"
+    ]
+
+
+def test_multichain_rpc_environment_overrides_are_comma_separated(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text("database_path: monitor.db\n", encoding="utf-8")
+
+    config = load_config(
+        path,
+        environ={
+            "TEMPO_RPC_URLS": (
+                "https://tempo-one.example,https://tempo-two.example"
+            ),
+            "SOLANA_RPC_URLS": "https://solana.example",
+        },
+    )
+
+    assert config.supply.multichain.tempo_rpc_urls == [
+        "https://tempo-one.example",
+        "https://tempo-two.example",
+    ]
+    assert config.supply.multichain.solana_rpc_urls == [
+        "https://solana.example"
+    ]
+
+
 def test_load_config_rejects_invalid_token_address(tmp_path: Path) -> None:
     path = tmp_path / "config.yaml"
     path.write_text(
