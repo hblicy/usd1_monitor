@@ -334,6 +334,11 @@ class InformationConfig(StrictModel):
                 raise ValueError(f"information.{source}.url is outside allowlist")
         return self
 
+
+class DashboardConfig(StrictModel):
+    port: int = Field(default=8080, ge=1024, le=65535)
+
+
 class AppConfig(StrictModel):
     database_path: Path
     timezone: str = "Asia/Shanghai"
@@ -347,6 +352,7 @@ class AppConfig(StrictModel):
     por: PorConfig = Field(default_factory=PorConfig)
     supply: SupplyConfig = Field(default_factory=SupplyConfig)
     information: InformationConfig = Field(default_factory=InformationConfig)
+    dashboard: DashboardConfig = Field(default_factory=DashboardConfig)
     wechat_webhook: str | None = None
 
     @field_validator("timezone")

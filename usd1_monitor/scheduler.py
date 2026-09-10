@@ -78,7 +78,6 @@ NOT_MONITORED = (
     "binance_wallet_concentration",
     "social_media_sentiment",
     "defi_liquidations",
-    "web_dashboard",
 )
 
 MUTABLE_EVM_EVENT_TYPES = (

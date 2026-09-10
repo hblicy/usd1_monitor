@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>USD1 风险监控</title>
+  <link rel="stylesheet" href="/assets/dashboard.css">
+</head>
+<body>
+  <div class="page-shell">
+    <header class="page-header">
+      <div>
+        <h1>USD1 风险监控</h1>
+        <p id="last-updated" class="last-updated" aria-live="polite">正在读取监控数据</p>
+      </div>
+      <button id="refresh-button" class="refresh-button" type="button">立即刷新</button>
+    </header>
+
+    <div id="stale-banner" class="stale-banner" role="status" aria-live="polite" hidden>
+      数据暂时无法读取，当前内容可能已过期。
+    </div>
+
+    <main id="dashboard" aria-busy="true">
+      <section class="status-grid" aria-label="总体状态">
+        <article id="business-status" class="status-panel" data-level="UNKNOWN">
+          <h2>资产风险</h2>
+          <div class="status-line">
+            <span class="status-dot" aria-hidden="true"></span>
+            <strong id="business-level">读取中</strong>
+          </div>
+          <p id="business-message">正在判断 USD1 是否存在业务风险。</p>
+        </article>
+        <article id="health-status" class="status-panel" data-level="UNKNOWN">
+          <h2>监控健康</h2>
+          <div class="status-line">
+            <span class="status-dot" aria-hidden="true"></span>
+            <strong id="health-level">读取中</strong>
+          </div>
+          <p id="health-message">正在检查监控服务和数据源。</p>
+        </article>
+      </section>
+
+      <section id="active-risks" class="section-panel attention-panel">
+        <div class="section-heading">
+          <h2>当前提醒</h2>
+        </div>
+        <div id="active-risk-list" class="risk-list" aria-live="polite">
+          <p class="empty-copy">正在读取监控数据</p>
+        </div>
+      </section>
+
+      <section id="key-metrics" class="section-panel">
+        <div class="section-heading">
+          <h2>关键指标</h2>
+        </div>
+        <div id="metric-grid" class="metric-grid" aria-live="polite"></div>
+      </section>
+
+      <section id="collector-health" class="section-panel">
+        <div class="section-heading">
+          <h2>数据源健康</h2>
+        </div>
+        <div id="collector-list" class="collector-grid" aria-live="polite">
+          <p class="empty-copy">正在读取数据源状态</p>
+        </div>
+      </section>
+
+      <section id="recent-events" class="section-panel">
+        <div class="section-heading">
+          <h2>最近事件</h2>
+        </div>
+        <div class="recent-grid">
+          <article class="recent-column">
+            <h3>告警与恢复</h3>
+            <div id="recent-alerts" class="recent-list"></div>
+          </article>
+          <article class="recent-column">
+            <h3>链上事件</h3>
+            <div id="recent-chain-events" class="recent-list"></div>
+          </article>
+          <article class="recent-column">
+            <h3>官方公告</h3>
+            <div id="recent-announcements" class="recent-list"></div>
+          </article>
+        </div>
+      </section>
+    </main>
+  </div>
+  <script src="/assets/dashboard.js" defer></script>
+</body>
+</html>

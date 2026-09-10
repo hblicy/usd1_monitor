@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import sys
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
 from typing import Protocol
 
@@ -65,6 +65,7 @@ class Closable(Protocol):
 
 
 MonitorBuilder = Callable[[AppConfig, Storage], tuple[object, Closable]]
+DashboardRunner = Callable[[AppConfig], Awaitable[None]]
 
 
 def build_market_monitor(
@@ -260,7 +261,7 @@ def build_market_monitor(
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python -m usd1_monitor")
     parser.add_argument("--config", type=Path, default=Path("config.yaml"))
-    parser.add_argument("command", choices=("check", "run", "status"))
+    parser.add_argument("command", choices=("check", "run", "status", "dashboard"))
     return parser
 
 
@@ -268,6 +269,7 @@ async def async_main(
     argv: Sequence[str] | None = None,
     *,
     monitor_builder: MonitorBuilder | None = None,
+    dashboard_runner: DashboardRunner | None = None,
 ) -> int:
     args = _parser().parse_args(argv)
     load_dotenv(args.config.resolve().parent / ".env", override=False)
@@ -276,6 +278,14 @@ async def async_main(
     except ConfigError as exc:
         print(str(exc), file=sys.stderr)
         return 2
+
+    if args.command == "dashboard":
+        if dashboard_runner is None:
+            from usd1_monitor.dashboard_server import run_dashboard
+
+            dashboard_runner = run_dashboard
+        await dashboard_runner(config)
+        return 0
 
     if args.command == "run":
         configure_logging(

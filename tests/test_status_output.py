@@ -18,10 +18,10 @@ def test_status_names_every_non_monitored_capability() -> None:
         "binance_wallet_concentration",
         "social_media_sentiment",
         "defi_liquidations",
-        "web_dashboard",
     }
 
     assert set(NOT_MONITORED) == expected
+    assert "web_dashboard" not in NOT_MONITORED
 
 
 def test_full_multichain_reconciliation_is_no_longer_not_monitored() -> None:
