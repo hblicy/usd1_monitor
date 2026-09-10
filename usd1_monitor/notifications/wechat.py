@@ -34,6 +34,7 @@ COLLECTOR_LABELS = {
     "supply_ethereum": "Ethereum 供应量",
     "supply_bsc": "BNB Chain 供应量",
     "supply_defillama": "DefiLlama 全链供应量",
+    "supply_multichain": "多链供应量",
     "supply": "供应量",
     "reserve_supply": "储备与供应量",
     "information": "官方信息",
@@ -73,6 +74,24 @@ OFFICIAL_SOURCE_LABELS = {
     "bitgo": "BitGo",
     "wlfi": "WLFI",
     "occ": "OCC",
+}
+SUPPLY_COMPONENT_LABELS = {
+    "native_ethereum": "Ethereum 原生供应量",
+    "native_bsc": "BNB Chain 原生供应量",
+    "native_tron": "Tron 原生供应量",
+    "native_solana": "Solana 原生供应量",
+    "native_aptos": "Aptos 原生供应量",
+    "native_tempo": "Tempo 原生供应量",
+    "bridged_plume": "Plume 跨链发行量",
+    "bridged_ab": "AB Core 跨链发行量",
+    "bridged_monad": "Monad 跨链发行量",
+    "bridged_mantle": "Mantle 跨链发行量",
+    "bridged_morph": "Morph 跨链发行量",
+    "locked_ethereum": "Ethereum 桥池余额",
+    "locked_bsc": "BNB Chain 桥池余额",
+    "locked_solana": "Solana 桥池余额",
+    "locked_aptos": "Aptos 桥池余额",
+    "locked_tempo": "Tempo 桥池余额",
 }
 
 
@@ -125,6 +144,17 @@ def _format_number(value: object) -> str:
     if isinstance(value, float):
         return f"{value:.8f}".rstrip("0").rstrip(".")
     return str(value)
+
+
+def _format_usd1_amount(value: object) -> str:
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return _format_number(value)
+    amount = abs(float(value))
+    if amount >= 100_000_000:
+        return f"{_format_number(amount / 100_000_000)} 亿"
+    if amount >= 10_000:
+        return f"{_format_number(amount / 10_000)} 万"
+    return _format_number(amount)
 
 
 def _format_value(value: object) -> str:
@@ -181,6 +211,27 @@ def _human_summary(transition: RiskTransition) -> tuple[str, list[str]]:
     evidence = transition.evidence
     recovered = transition.current is RiskLevel.GREEN
     details: list[str] = []
+
+    if rule_id == "health.supply_multichain":
+        if recovered:
+            return "供应量数据获取已恢复", details
+        failed_sources = evidence.get("failed_sources")
+        if isinstance(failed_sources, (list, tuple)):
+            labels = list(
+                dict.fromkeys(
+                    SUPPLY_COMPONENT_LABELS.get(str(item), str(item))
+                    for item in failed_sources
+                )
+            )
+            if labels:
+                details.append(f"未能获取：{'、'.join(labels)}")
+        failures = evidence.get("current")
+        if isinstance(failures, (int, float)) and failures > 0:
+            return (
+                "供应量数据连续 "
+                f"{_format_number(failures)} 次未能完整获取"
+            ), details
+        return "供应量数据暂时未能完整获取", details
 
     if rule_id.startswith("health."):
         label = _collector_label(rule_id.removeprefix("health."))
@@ -262,6 +313,30 @@ def _human_summary(transition: RiskTransition) -> tuple[str, list[str]]:
         current = evidence.get("current")
         if isinstance(current, (int, float)):
             details.append(f"下降比例：{_format_number(current * 100)}%")
+        return summary, details
+
+    if rule_id == "supply.bridge_reconciliation":
+        if recovered:
+            summary = "跨链发行量与桥池锁仓量已恢复正常"
+        else:
+            difference = _format_usd1_amount(evidence.get("difference", 0))
+            if evidence.get("direction") == "locked_excess":
+                summary = f"桥池锁仓量比跨链发行量多 {difference} USD1"
+            else:
+                summary = f"跨链发行量比桥池锁仓量多 {difference} USD1"
+        issued = evidence.get("issued")
+        locked = evidence.get("locked")
+        if issued is not None:
+            details.append(
+                f"跨链发行量：{_format_usd1_amount(issued)} USD1"
+            )
+        if locked is not None:
+            details.append(
+                f"桥池锁仓量：{_format_usd1_amount(locked)} USD1"
+            )
+        ratio = evidence.get("difference_percent")
+        if isinstance(ratio, (int, float)):
+            details.append(f"差额比例：{_format_number(abs(ratio))}%")
         return summary, details
 
     if rule_id.startswith("event.information.bitgo.attestation_fields."):

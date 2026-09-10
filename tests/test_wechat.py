@@ -269,6 +269,32 @@ def test_single_health_recovery_does_not_hide_other_health_failure() -> None:
     assert "🟢 USD1 监控已恢复" not in content
 
 
+def test_bridge_overissue_message_is_plain_chinese() -> None:
+    message = format_transitions(
+        [
+            RiskTransition(
+                rule_id="supply.bridge_reconciliation",
+                previous=RiskLevel.GREEN,
+                current=RiskLevel.YELLOW,
+                changed_at=NOW,
+                first_triggered_at=NOW,
+                evidence={
+                    "direction": "overissued",
+                    "issued": 1_250_000_000,
+                    "locked": 1_249_650_000,
+                    "difference": 350_000,
+                    "difference_percent": 0.028,
+                    "data_time": NOW.isoformat(),
+                },
+            )
+        ]
+    )
+
+    assert "跨链发行量比桥池锁仓量多 35 万 USD1" in message
+    assert "supply.bridge_reconciliation" not in message
+    assert "threshold" not in message
+
+
 @pytest.mark.parametrize(
     ("rule_id", "evidence", "expected"),
     (

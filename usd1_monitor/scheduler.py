@@ -26,7 +26,10 @@ from usd1_monitor.collectors.supply import (
     SupplySnapshot,
     estimated_coverage,
 )
-from usd1_monitor.collectors.multichain_supply import MultichainSupplySource
+from usd1_monitor.collectors.multichain_supply import (
+    REQUIRED_COMPONENT_IDS,
+    MultichainSupplySource,
+)
 from usd1_monitor.config import PorConfig, SupplyConfig
 from usd1_monitor.engine.evm_rules import (
     EXPLORER_BASE_URLS,
@@ -1562,7 +1565,11 @@ class ReserveSupplyMonitor:
                 ):
                     batch_errors.append(
                         (
-                            supply.scope,
+                            str(
+                                supply.observation.metadata.get(
+                                    "component_id", supply.scope
+                                )
+                            ),
                             SupplyDataError(
                                 f"safe block is older than {native_max_age}s"
                             ),
@@ -1578,41 +1585,99 @@ class ReserveSupplyMonitor:
             )
             supplies = batch.snapshots
             await self._persist_supplies(batch, checked_at)
-            errors: list[str] = []
             details: list[str] = []
             for supply in supplies:
-                source_name = (
-                    supply.scope
-                    if supply.scope in {"ethereum", "bsc"}
-                    else supply.observation.source
-                )
-                await _record_health(
-                    self._storage,
-                    f"supply_{source_name}",
-                    checked_at,
-                    success=True,
-                )
                 details.append(
                     f"supply {supply.scope}={supply.supply} "
                     f"quality={supply.observation.quality}"
                 )
-            for source, exc in batch.errors:
-                error = f"supply_{source}: {type(exc).__name__}: {exc}"
-                errors.append(error)
+
+            errors_by_id = {
+                source: f"supply_{source}: {type(exc).__name__}: {exc}"
+                for source, exc in batch.errors
+            }
+            observed_component_ids = {
+                str(component_id)
+                for supply in supplies
+                if (
+                    component_id := supply.observation.metadata.get(
+                        "component_id"
+                    )
+                )
+            }
+            required_failed_ids = (
+                REQUIRED_COMPONENT_IDS - observed_component_ids
+            ) | (set(errors_by_id) & REQUIRED_COMPONENT_IDS)
+            for component_id in sorted(REQUIRED_COMPONENT_IDS):
+                error = errors_by_id.get(component_id)
+                if component_id in required_failed_ids and error is None:
+                    error = f"supply_{component_id}: component missing"
+                await _record_health(
+                    self._storage,
+                    f"supply_{component_id}",
+                    checked_at,
+                    success=component_id not in required_failed_ids,
+                    error=error,
+                    enqueue_alerts=False,
+                )
+
+            required_errors = [
+                errors_by_id.get(
+                    component_id,
+                    f"supply_{component_id}: component missing",
+                )
+                for component_id in sorted(required_failed_ids)
+            ]
+            await _record_health(
+                self._storage,
+                "supply_multichain",
+                checked_at,
+                success=not required_failed_ids,
+                error="; ".join(required_errors) or None,
+                extra_evidence={
+                    "failed_sources": sorted(required_failed_ids)
+                },
+            )
+
+            has_defillama = any(
+                supply.observation.source == "defillama"
+                and supply.observation.metric == "supply.global"
+                for supply in supplies
+            )
+            if has_defillama or "defillama" in errors_by_id:
+                await _record_health(
+                    self._storage,
+                    "supply_defillama",
+                    checked_at,
+                    success=has_defillama,
+                    error=errors_by_id.get("defillama"),
+                )
+
+            for source, error in errors_by_id.items():
+                if source in REQUIRED_COMPONENT_IDS or source == "defillama":
+                    continue
                 await _record_health(
                     self._storage,
                     f"supply_{source}",
                     checked_at,
                     success=False,
                     error=error,
+                    enqueue_alerts=False,
                 )
+
             await _record_health(
                 self._storage,
                 "supply",
                 checked_at,
-                success=not batch.errors,
-                error="; ".join(errors) if batch.errors else None,
+                success=not required_failed_ids,
+                error="; ".join(required_errors) or None,
+                enqueue_alerts=False,
             )
+            errors = [
+                error
+                for source, error in errors_by_id.items()
+                if source != "defillama" or required_failed_ids
+            ]
             self._last_supply_run = checked_at
             return CheckResult(not errors, tuple(errors), tuple(details))
         except Exception as exc:
@@ -1620,10 +1685,13 @@ class ReserveSupplyMonitor:
             error = f"supply: {type(exc).__name__}: {exc}"
             await _record_health(
                 self._storage,
-                "supply",
+                "supply_multichain",
                 checked_at,
                 success=False,
                 error=error,
+                extra_evidence={
+                    "failed_sources": sorted(REQUIRED_COMPONENT_IDS)
+                },
             )
             return CheckResult(False, (error,))
 
@@ -2315,6 +2383,8 @@ async def _record_health(
     success: bool,
     error: str | None = None,
     critical: bool = False,
+    enqueue_alerts: bool = True,
+    extra_evidence: dict[str, object] | None = None,
 ) -> None:
     risk_state = await storage.get_risk_state(f"health.{collector_id}")
     previous_level = risk_state.level if risk_state is not None else RiskLevel.GREEN
@@ -2334,18 +2404,22 @@ async def _record_health(
     )
     if collector_id == "notification_wechat" and await storage.failed_alerts():
         level = max(level, RiskLevel.YELLOW)
+    evidence: dict[str, object] = {
+        "current": health.consecutive_failures,
+        "threshold": 3,
+        "data_time": now.isoformat(),
+        "last_error": health.last_error,
+    }
+    if extra_evidence:
+        evidence.update(extra_evidence)
     await StateEngine(storage).apply(
         [
             RuleEvaluation(
                 f"health.{collector_id}",
                 level,
-                {
-                    "current": health.consecutive_failures,
-                    "threshold": 3,
-                    "data_time": now.isoformat(),
-                    "last_error": health.last_error,
-                },
+                evidence,
             )
         ],
         now,
+        enqueue_alerts=enqueue_alerts,
     )

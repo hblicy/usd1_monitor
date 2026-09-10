@@ -5,6 +5,7 @@ import pytest
 from tests.fakes import FakeNotifier, FakePorCollector, FakeSupplyCollector
 from usd1_monitor.collectors.reserves import PorSnapshot
 from usd1_monitor.collectors.supply import SupplySnapshot
+from usd1_monitor.collectors.multichain_supply import REQUIRED_COMPONENT_IDS
 from usd1_monitor.models import Observation, RiskLevel
 from usd1_monitor.config import SupplyConfig
 from usd1_monitor.scheduler import (
@@ -73,6 +74,29 @@ def aggregate_snapshot(
     return SupplySnapshot("global", value, observed_at, observation)
 
 
+def component_snapshot_for_id(
+    component_id: str,
+    observed_at: datetime,
+) -> SupplySnapshot:
+    prefix, scope = component_id.split("_", 1)
+    metric = {
+        "native": "supply.native",
+        "bridged": "supply.bridged",
+        "locked": "bridge.locked",
+    }[prefix]
+    observation = Observation(
+        metric,
+        "test",
+        scope,
+        1,
+        "USD1",
+        observed_at,
+        observed_at,
+        metadata={"component_id": component_id},
+    )
+    return SupplySnapshot(scope, 1, observed_at, observation)
+
+
 def multichain_batch(
     *,
     native_total: float,
@@ -93,16 +117,28 @@ def multichain_batch(
             observed_at,
         ),
     )
-    return SupplyBatch(totals if complete else (), (), complete)
+    components = tuple(
+        component_snapshot_for_id(component_id, observed_at)
+        for component_id in sorted(REQUIRED_COMPONENT_IDS)
+    )
+    return SupplyBatch(
+        components + (totals if complete else ()),
+        (),
+        complete,
+    )
 
 
 def partial_multichain_batch(*failed_ids: str) -> SupplyBatch:
-    component = supply_snapshot("ethereum", 100, NOW)
+    failed = set(failed_ids)
+    components = tuple(
+        component_snapshot_for_id(component_id, NOW)
+        for component_id in sorted(REQUIRED_COMPONENT_IDS - failed)
+    )
     errors = tuple(
         (component_id, RuntimeError(f"{component_id} unavailable"))
         for component_id in failed_ids
     )
-    return SupplyBatch((component,), errors, False)
+    return SupplyBatch(components, errors, False)
 
 
 @pytest.mark.asyncio
@@ -778,10 +814,14 @@ async def test_recovered_supply_source_clears_its_health_state(storage) -> None:
         async def collect(self, collected_at):
             self.calls += 1
             if self.calls == 1:
-                return SupplyBatch((), (("ethereum", RuntimeError("offline")),))
+                return SupplyBatch(
+                    (),
+                    (("native_ethereum", RuntimeError("offline")),),
+                )
             observation = Observation(
                 "supply.native", "evm_rpc", "ethereum", 1_000,
                 "USD1", collected_at, collected_at,
+                metadata={"component_id": "native_ethereum"},
             )
             return SupplyBatch(
                 (SupplySnapshot("ethereum", 1_000, collected_at, observation),)
@@ -801,7 +841,7 @@ async def test_recovered_supply_source_clears_its_health_state(storage) -> None:
     await monitor.check_once(now=NOW)
     await monitor.check_once(now=NOW + timedelta(seconds=1))
 
-    health = await storage.get_collector_health("supply_ethereum")
+    health = await storage.get_collector_health("supply_native_ethereum")
     assert health is not None
     assert health.consecutive_failures == 0
 
@@ -1194,3 +1234,84 @@ async def test_bridge_evaluation_failure_rolls_back_complete_totals(
         )
         is None
     )
+
+
+@pytest.mark.asyncio
+async def test_three_partial_runs_enqueue_one_grouped_health_alert(
+    storage,
+) -> None:
+    por = FakePorCollector()
+    supply = FakeSupplyCollector()
+    for hour in range(3):
+        current = NOW + timedelta(hours=hour)
+        por.queue_snapshot(por_snapshot_for(4_200, current))
+        supply.queue_batch(
+            partial_multichain_batch("native_tron", "locked_aptos")
+        )
+    monitor = ReserveSupplyMonitor(por, supply, storage, None)
+
+    for hour in range(3):
+        await monitor.check_once(
+            deliver=False,
+            now=NOW + timedelta(hours=hour),
+        )
+
+    pending = await storage.pending_alerts()
+    assert len(pending) == 1
+    assert "Tron" in pending[0].content
+    assert "Aptos" in pending[0].content
+    assert "供应量数据连续 3 次未能完整获取" in pending[0].content
+
+
+@pytest.mark.asyncio
+async def test_grouped_supply_health_recovers_once_after_dwell(
+    storage,
+) -> None:
+    por = FakePorCollector()
+    por.queue_snapshot(por_snapshot_for(4_200, NOW))
+    supply = FakeSupplyCollector()
+    for _ in range(3):
+        supply.queue_batch(partial_multichain_batch("native_tron"))
+    supply.queue_batch(
+        multichain_batch(
+            native_total=4_000,
+            bridged_total=1_000,
+            locked_total=1_000,
+            complete=True,
+        )
+    )
+    supply.queue_batch(
+        multichain_batch(
+            native_total=4_000,
+            bridged_total=1_000,
+            locked_total=1_000,
+            complete=True,
+            observed_at=NOW + timedelta(seconds=63),
+        )
+    )
+    monitor = ReserveSupplyMonitor(
+        por,
+        supply,
+        storage,
+        None,
+        supply_config=SupplyConfig(interval_seconds=1),
+    )
+
+    for second in (0, 1, 2):
+        await monitor.check_once(
+            deliver=False,
+            now=NOW + timedelta(seconds=second),
+        )
+    await monitor.check_once(
+        deliver=False,
+        now=NOW + timedelta(seconds=32),
+    )
+    assert len(await storage.pending_alerts()) == 1
+
+    await monitor.check_once(
+        deliver=False,
+        now=NOW + timedelta(seconds=63),
+    )
+    pending = await storage.pending_alerts()
+    assert len(pending) == 2
+    assert "供应量数据获取已恢复" in pending[-1].content
