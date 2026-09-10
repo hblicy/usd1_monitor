@@ -32,7 +32,7 @@
 - Modify: `usd1_monitor/config.py`
 - Modify: `tests/test_config.py`
 
-- [ ] **Step 1: 写入官方资产清单和旧配置兼容测试**
+- [x] **Step 1: 写入官方资产清单和旧配置兼容测试**
 
 ```python
 # tests/test_supply_assets.py
@@ -107,13 +107,13 @@ def test_multichain_rpc_environment_overrides_are_comma_separated(
     ]
 ```
 
-- [ ] **Step 2: 运行定向测试并确认模块和配置字段尚不存在**
+- [x] **Step 2: 运行定向测试并确认模块和配置字段尚不存在**
 
 Run: `python -m pytest tests/test_supply_assets.py tests/test_config.py -q`
 
 Expected: FAIL，导入 `usd1_monitor.supply_assets` 或访问 `supply.multichain` 失败。
 
-- [ ] **Step 3: 创建不可变资产清单**
+- [x] **Step 3: 创建不可变资产清单**
 
 ```python
 # usd1_monitor/supply_assets.py
@@ -178,7 +178,7 @@ LOCKED_EVM_SPECS = (LOCKED_ETHEREUM, LOCKED_BSC, LOCKED_TEMPO)
 
 The implementation must format these constructors across lines while preserving the exact values above.
 
-- [ ] **Step 4: 增加严格 HTTPS 端点模型和九个环境变量覆盖**
+- [x] **Step 4: 增加严格 HTTPS 端点模型和九个环境变量覆盖**
 
 ```python
 # usd1_monitor/config.py
@@ -243,13 +243,13 @@ supply = config.supply.model_copy(update={"multichain": multichain})
 
 Include `"supply": supply` in the final `AppConfig.model_copy(update=...)` call.
 
-- [ ] **Step 5: 运行资产与配置测试**
+- [x] **Step 5: 运行资产与配置测试**
 
 Run: `python -m pytest tests/test_supply_assets.py tests/test_config.py -q`
 
 Expected: PASS。
 
-- [ ] **Step 6: 提交资产和配置基础**
+- [x] **Step 6: 提交资产和配置基础**
 
 ```bash
 git add usd1_monitor/supply_assets.py usd1_monitor/config.py tests/test_supply_assets.py tests/test_config.py
@@ -263,7 +263,7 @@ git commit -m "配置完整多链供应量数据源"
 - Create: `usd1_monitor/collectors/multichain_evm.py`
 - Create: `tests/test_multichain_evm.py`
 
-- [ ] **Step 1: 写入固定精度、同链区块复用和部分失败测试**
+- [x] **Step 1: 写入固定精度、同链区块复用和部分失败测试**
 
 ```python
 # tests/test_multichain_evm.py
@@ -311,13 +311,13 @@ async def test_evm_chain_keeps_successful_component_when_pool_call_fails() -> No
     assert batch.errors[0][0] == "locked_ethereum"
 ```
 
-- [ ] **Step 2: 运行测试并确认读取器不存在**
+- [x] **Step 2: 运行测试并确认读取器不存在**
 
 Run: `python -m pytest tests/test_multichain_evm.py -q`
 
 Expected: FAIL，无法导入 `EvmChainSupplyCollector`。
 
-- [ ] **Step 3: 实现单链读取批次**
+- [x] **Step 3: 实现单链读取批次**
 
 ```python
 # usd1_monitor/collectors/supply.py
@@ -402,13 +402,13 @@ class EvmChainSupplyCollector:
         return SupplySnapshot(spec.scope, float(amount), collected_at, observation)
 ```
 
-- [ ] **Step 4: 运行 EVM 读取器和原有供应量测试**
+- [x] **Step 4: 运行 EVM 读取器和原有供应量测试**
 
 Run: `python -m pytest tests/test_multichain_evm.py tests/test_supply_collector.py -q`
 
 Expected: PASS；原 `NativeSupplyCollector` 的兼容测试保持通过。
 
-- [ ] **Step 5: 提交 EVM 多链读取器**
+- [x] **Step 5: 提交 EVM 多链读取器**
 
 ```bash
 git add usd1_monitor/collectors/supply.py usd1_monitor/collectors/multichain_evm.py usd1_monitor/supply_assets.py tests/test_multichain_evm.py
@@ -421,7 +421,7 @@ git commit -m "读取EVM多链供应量与桥池余额"
 - Create: `usd1_monitor/collectors/non_evm_supply.py`
 - Create: `tests/test_non_evm_supply.py`
 
-- [ ] **Step 1: 写入三个协议的响应解析测试**
+- [x] **Step 1: 写入三个协议的响应解析测试**
 
 ```python
 # tests/test_non_evm_supply.py
@@ -589,13 +589,13 @@ async def test_aptos_negative_pool_amount_fails_locked_component() -> None:
     assert len(batch.snapshots) == 1
 ```
 
-- [ ] **Step 2: 运行测试并确认非 EVM 读取器不存在**
+- [x] **Step 2: 运行测试并确认非 EVM 读取器不存在**
 
 Run: `python -m pytest tests/test_non_evm_supply.py -q`
 
 Expected: FAIL，无法导入三个 collector。
 
-- [ ] **Step 3: 实现公共构造和 HTTP 端点回退**
+- [x] **Step 3: 实现公共构造和 HTTP 端点回退**
 
 ```python
 # usd1_monitor/collectors/non_evm_supply.py
@@ -651,7 +651,7 @@ def _snapshot(
     return SupplySnapshot(scope, float(value), collected_at, observation)
 ```
 
-- [ ] **Step 4: 实现 Tron 常量合约读取**
+- [x] **Step 4: 实现 Tron 常量合约读取**
 
 ```python
 class TronSupplyCollector:
@@ -690,7 +690,7 @@ class TronSupplyCollector:
             return ComponentBatch((), (("native_tron", exc),))
 ```
 
-- [ ] **Step 5: 实现 Solana `getAccountInfo` 解析**
+- [x] **Step 5: 实现 Solana `getAccountInfo` 解析**
 
 ```python
 class SolanaSupplyCollector:
@@ -728,7 +728,7 @@ class SolanaSupplyCollector:
         return ComponentBatch(tuple(snapshots), tuple(errors))
 ```
 
-- [ ] **Step 6: 实现 Aptos 单次 GraphQL 查询**
+- [x] **Step 6: 实现 Aptos 单次 GraphQL 查询**
 
 ```python
 APTOS_QUERY = """
@@ -814,13 +814,13 @@ class AptosSupplyCollector:
         return ComponentBatch(tuple(snapshots), tuple(errors))
 ```
 
-- [ ] **Step 7: 运行非 EVM 和 HTTP/RPC 回归测试**
+- [x] **Step 7: 运行非 EVM 和 HTTP/RPC 回归测试**
 
 Run: `python -m pytest tests/test_non_evm_supply.py tests/test_http.py tests/test_rpc.py -q`
 
 Expected: PASS。
 
-- [ ] **Step 8: 提交非 EVM 读取器**
+- [x] **Step 8: 提交非 EVM 读取器**
 
 ```bash
 git add usd1_monitor/collectors/non_evm_supply.py tests/test_non_evm_supply.py
@@ -833,7 +833,7 @@ git commit -m "读取非EVM供应量与桥池余额"
 - Create: `usd1_monitor/collectors/multichain_supply.py`
 - Create: `tests/test_multichain_supply.py`
 
-- [ ] **Step 1: 写入完整聚合、缺项拒绝和并发上限测试**
+- [x] **Step 1: 写入完整聚合、缺项拒绝和并发上限测试**
 
 ```python
 # tests/test_multichain_supply.py
@@ -956,13 +956,13 @@ async def test_source_concurrency_never_exceeds_four() -> None:
     assert gauge.maximum == 4
 ```
 
-- [ ] **Step 2: 运行测试并确认编排器不存在**
+- [x] **Step 2: 运行测试并确认编排器不存在**
 
 Run: `python -m pytest tests/test_multichain_supply.py -q`
 
 Expected: FAIL，无法导入 `MultichainSupplySource`。
 
-- [ ] **Step 3: 实现严格组件集合和聚合观察**
+- [x] **Step 3: 实现严格组件集合和聚合观察**
 
 ```python
 # usd1_monitor/collectors/multichain_supply.py
@@ -1071,13 +1071,13 @@ class MultichainSupplySource:
         )
 ```
 
-- [ ] **Step 4: 运行编排器与所有采集器测试**
+- [x] **Step 4: 运行编排器与所有采集器测试**
 
 Run: `python -m pytest tests/test_multichain_supply.py tests/test_multichain_evm.py tests/test_non_evm_supply.py -q`
 
 Expected: PASS。
 
-- [ ] **Step 5: 提交多链编排器**
+- [x] **Step 5: 提交多链编排器**
 
 ```bash
 git add usd1_monitor/collectors/multichain_supply.py tests/test_multichain_supply.py
@@ -1090,7 +1090,7 @@ git commit -m "聚合完整多链供应量快照"
 - Modify: `usd1_monitor/engine/supply_rules.py`
 - Modify: `tests/test_supply_rules.py`
 
-- [ ] **Step 1: 写入正负差额、边界、升级和恢复测试**
+- [x] **Step 1: 写入正负差额、边界、升级和恢复测试**
 
 ```python
 # tests/test_supply_rules.py
@@ -1179,13 +1179,13 @@ def test_direction_change_restarts_confirmation() -> None:
     assert result.level is RiskLevel.GREEN
 ```
 
-- [ ] **Step 2: 运行供应量规则测试并确认新类型不存在**
+- [x] **Step 2: 运行供应量规则测试并确认新类型不存在**
 
 Run: `python -m pytest tests/test_supply_rules.py -q`
 
 Expected: FAIL，无法导入桥接规则类型。
 
-- [ ] **Step 3: 实现纯函数状态机**
+- [x] **Step 3: 实现纯函数状态机**
 
 ```python
 # usd1_monitor/engine/supply_rules.py
@@ -1284,13 +1284,13 @@ def evaluate_bridge_reconciliation(
     )
 ```
 
-- [ ] **Step 4: 运行全部供应量规则测试**
+- [x] **Step 4: 运行全部供应量规则测试**
 
 Run: `python -m pytest tests/test_supply_rules.py -q`
 
 Expected: PASS，现有覆盖率和 24 小时下降规则不回归。
 
-- [ ] **Step 5: 提交桥接风险规则**
+- [x] **Step 5: 提交桥接风险规则**
 
 ```bash
 git add usd1_monitor/engine/supply_rules.py tests/test_supply_rules.py
@@ -1304,7 +1304,7 @@ git commit -m "评估跨链发行与锁仓差额"
 - Modify: `tests/fakes.py`
 - Modify: `tests/test_reserve_supply_integration.py`
 
-- [ ] **Step 1: 写入完整批次、残缺批次和覆盖率分母测试**
+- [x] **Step 1: 写入完整批次、残缺批次和覆盖率分母测试**
 
 ```python
 # tests/test_reserve_supply_integration.py
@@ -1449,13 +1449,13 @@ async def test_bridge_evaluation_failure_rolls_back_complete_totals(
     ) is None
 ```
 
-- [ ] **Step 2: 运行集成测试并确认现有 monitor 仍依赖 DefiLlama**
+- [x] **Step 2: 运行集成测试并确认现有 monitor 仍依赖 DefiLlama**
 
 Run: `python -m pytest tests/test_reserve_supply_integration.py -q`
 
 Expected: FAIL，覆盖率仍读取 `supply.global` 或 `SupplyBatch` 不表达完整性。
 
-- [ ] **Step 3: 扩展供应量批次并合并 DefiLlama 辅助结果**
+- [x] **Step 3: 扩展供应量批次并合并 DefiLlama 辅助结果**
 
 ```python
 # usd1_monitor/scheduler.py
@@ -1506,7 +1506,7 @@ class CombinedSupplySource:
 
 Replace the old `CombinedSupplySource` constructor and update every in-repository caller and test in this task. Do not add a permanent compatibility branch for the old internal constructor.
 
-- [ ] **Step 4: 让供应量持久化只在完整批次更新聚合风险**
+- [x] **Step 4: 让供应量持久化只在完整批次更新聚合风险**
 
 Change `_persist_supplies` to receive the entire `SupplyBatch`. Insert all snapshots, then only when `batch.multichain_complete` is true:
 
@@ -1523,7 +1523,7 @@ if evaluations:
 
 Remove coverage updates from `_persist_por`; PoR persistence continues to evaluate only PoR age/change rules. In `_coverage_update`, replace `supply.global` with `supply.multichain_total` and set the observation source to `por+onchain_multichain`. Remove the `force`/replace path after updating its callers because one complete supply snapshot produces exactly one coverage point.
 
-- [ ] **Step 5: 基于聚合值评估桥接与 24 小时下降**
+- [x] **Step 5: 基于聚合值评估桥接与 24 小时下降**
 
 `_bridge_supply_evaluations` reads the two latest `supply.bridged_total` and `bridge.locked_total` observations, pairs rows by identical `collected_at`, ignores gaps over 1.5 supply intervals, passes readings plus prior level to `evaluate_bridge_reconciliation`, and emits:
 
@@ -1544,7 +1544,7 @@ RuleEvaluation(
 
 Replace `_native_drop_24h` row selection with `supply.multichain_total` current and at-or-before-24-hour observations. Preserve the existing freshness window and `max(0.0, ...)` behavior.
 
-- [ ] **Step 6: 更新假采集器并运行储备供应量集成测试**
+- [x] **Step 6: 更新假采集器并运行储备供应量集成测试**
 
 Add `FakeSupplyCollector.queue_batch(batch)` without removing `queue_global_supply`, so older tests remain readable while new tests supply explicit complete/partial batches.
 
@@ -1552,7 +1552,7 @@ Run: `python -m pytest tests/test_reserve_supply_integration.py tests/test_suppl
 
 Expected: PASS。
 
-- [ ] **Step 7: 提交监控器集成**
+- [x] **Step 7: 提交监控器集成**
 
 ```bash
 git add usd1_monitor/scheduler.py tests/fakes.py tests/test_reserve_supply_integration.py
@@ -1567,7 +1567,7 @@ git commit -m "接入完整多链供应量风险核对"
 - Modify: `tests/test_reserve_supply_integration.py`
 - Modify: `tests/test_wechat.py`
 
-- [ ] **Step 1: 写入单条健康通知和桥接文案测试**
+- [x] **Step 1: 写入单条健康通知和桥接文案测试**
 
 ```python
 # tests/test_reserve_supply_integration.py
@@ -1651,13 +1651,13 @@ async def test_grouped_supply_health_recovers_once_after_dwell(storage) -> None:
     assert "供应量数据获取已恢复" in pending[-1].content
 ```
 
-- [ ] **Step 2: 运行通知测试并确认当前产生多个健康规则**
+- [x] **Step 2: 运行通知测试并确认当前产生多个健康规则**
 
 Run: `python -m pytest tests/test_reserve_supply_integration.py tests/test_wechat.py -q`
 
 Expected: FAIL，健康状态逐来源排队或桥接规则落入通用文案。
 
-- [ ] **Step 3: 支持静默维护单项健康并公开一个聚合规则**
+- [x] **Step 3: 支持静默维护单项健康并公开一个聚合规则**
 
 Extend `_record_health` with `enqueue_alerts: bool = True` and `extra_evidence: dict[str, object] | None = None`; pass `enqueue_alerts` into `StateEngine.apply` and merge `extra_evidence` into its evidence dictionary.
 
@@ -1686,7 +1686,7 @@ await _record_health(
 
 Continue tracking DefiLlama under `supply_defillama`. Do not include a DefiLlama-only failure in `health.supply_multichain`, because it is auxiliary and does not invalidate the complete on-chain snapshot.
 
-- [ ] **Step 4: 添加供应量来源名称和桥接风险文案**
+- [x] **Step 4: 添加供应量来源名称和桥接风险文案**
 
 ```python
 # usd1_monitor/notifications/wechat.py
@@ -1712,13 +1712,13 @@ SUPPLY_COMPONENT_LABELS = {
 
 Add special handling before the generic health branch for `health.supply_multichain`, listing the unique labels from `failed_sources`. Add special handling for `supply.bridge_reconciliation`: use `difference` absolute value, direction-specific summary, and issued/locked detail lines. Add `_format_usd1_amount` that formats exact multiples or rounded values in 亿/万 units without Markdown.
 
-- [ ] **Step 5: 运行集成和微信测试**
+- [x] **Step 5: 运行集成和微信测试**
 
 Run: `python -m pytest tests/test_reserve_supply_integration.py tests/test_wechat.py tests/test_health.py -q`
 
 Expected: PASS，每次状态变化最多一条多链供应量健康消息。
 
-- [ ] **Step 6: 提交通知降噪**
+- [x] **Step 6: 提交通知降噪**
 
 ```bash
 git add usd1_monitor/scheduler.py usd1_monitor/notifications/wechat.py tests/test_reserve_supply_integration.py tests/test_wechat.py
@@ -1740,7 +1740,7 @@ git commit -m "合并多链供应量健康通知"
 - Modify: `tests/test_status_output.py`
 - Modify: `tests/test_evm_integration.py`
 
-- [ ] **Step 1: 写入生产 builder 和能力状态测试**
+- [x] **Step 1: 写入生产 builder 和能力状态测试**
 
 ```python
 # tests/test_cli.py
@@ -1792,13 +1792,13 @@ async def test_status_prints_multichain_aggregate_metrics(storage, capsys) -> No
         assert f"metric {metric}: FACT" in output
 ```
 
-- [ ] **Step 2: 运行 CLI、示例和状态测试并确认接线缺失**
+- [x] **Step 2: 运行 CLI、示例和状态测试并确认接线缺失**
 
 Run: `python -m pytest tests/test_cli.py tests/test_examples.py tests/test_status_output.py tests/test_evm_integration.py -q`
 
 Expected: FAIL，builder 仍只创建 Ethereum/BNB 原生供应量源，能力仍列为未覆盖。
 
-- [ ] **Step 3: 在 builder 中构造所有客户端和采集器**
+- [x] **Step 3: 在 builder 中构造所有客户端和采集器**
 
 Build `JsonRpcClient` instances for Tempo、Plume、AB Core、Monad、Mantle、Morph with the chain IDs from `EVM_CHAIN_IDS`. Reuse existing Ethereum/BNB clients and their configured confirmation depths; use confirmation depth 0 for the six supply-only EVM networks.
 
@@ -1827,7 +1827,7 @@ reserve_supply = ReserveSupplyMonitor(
 
 Do not add SDK dependencies; all new protocols use the existing HTTP and JSON-RPC clients.
 
-- [ ] **Step 4: 更新 `check/status` 和启动能力名称**
+- [x] **Step 4: 更新 `check/status` 和启动能力名称**
 
 Remove `full_multichain_supply_reconciliation` from `NOT_MONITORED` but leave `tron_solana_aptos_tempo_bridges`, because this feature reconciles balances and does not trace individual cross-chain transactions.
 
@@ -1841,7 +1841,7 @@ supply_multichain total=...
 bridge_reconciliation issued=... locked=... delta=...
 ```
 
-- [ ] **Step 5: 更新示例配置和 README**
+- [x] **Step 5: 更新示例配置和 README**
 
 Add this exact mapping under `supply` in both YAML examples:
 
@@ -1886,13 +1886,13 @@ README changes:
 - remove only `full_multichain_supply_reconciliation` from the NOT_MONITORED list;
 - retain individual bridge transaction monitoring as not covered.
 
-- [ ] **Step 6: 运行 CLI、配置示例、状态和启动测试**
+- [x] **Step 6: 运行 CLI、配置示例、状态和启动测试**
 
 Run: `python -m pytest tests/test_cli.py tests/test_examples.py tests/test_status_output.py tests/test_evm_integration.py -q`
 
 Expected: PASS。
 
-- [ ] **Step 7: 提交生产与部署接线**
+- [x] **Step 7: 提交生产与部署接线**
 
 ```bash
 git add usd1_monitor/cli.py usd1_monitor/scheduler.py usd1_monitor/notifications/wechat.py config.example.yaml deploy/config.production.example.yaml .env.example README.md tests/test_cli.py tests/test_examples.py tests/test_status_output.py tests/test_evm_integration.py
@@ -1904,7 +1904,7 @@ git commit -m "启用完整多链供应量核对"
 **Files:**
 - Modify: `docs/superpowers/plans/2026-09-10-full-multichain-supply-reconciliation.md`
 
-- [ ] **Step 1: 运行新增功能的完整定向测试**
+- [x] **Step 1: 运行新增功能的完整定向测试**
 
 Run:
 
@@ -1914,13 +1914,13 @@ python -m pytest tests/test_supply_assets.py tests/test_multichain_evm.py tests/
 
 Expected: 全部通过，无失败或错误。
 
-- [ ] **Step 2: 运行全量测试**
+- [x] **Step 2: 运行全量测试**
 
 Run: `python -m pytest -q`
 
 Expected: 全部测试通过；仅保留仓库原有、带明确原因的 skip。
 
-- [ ] **Step 3: 检查新增生产路径没有高成本 RPC 方法**
+- [x] **Step 3: 检查新增生产路径没有高成本 RPC 方法**
 
 Run:
 
@@ -1938,7 +1938,7 @@ rg -n "eth_blockNumber|eth_call|getAccountInfo|triggerconstantcontract|fungible_
 
 Expected: 只出现设计批准的当前状态读取方法。
 
-- [ ] **Step 4: 检查格式、范围和提交历史**
+- [x] **Step 4: 检查格式、范围和提交历史**
 
 Run: `git diff --check origin/main...HEAD`
 
@@ -1952,7 +1952,7 @@ Run: `git log --oneline origin/main..HEAD`
 
 Expected: 设计提交以及本计划中列出的中文小步提交。
 
-- [ ] **Step 5: 在本地示例配置上运行离线可执行性检查**
+- [x] **Step 5: 在本地示例配置上运行离线可执行性检查**
 
 Run: `python -m usd1_monitor --config config.example.yaml status`
 
@@ -1966,7 +1966,7 @@ python -m usd1_monitor --config config.yaml check
 
 Expected: 输出 6 条原生链、5 条桥接链、5 个桥池、完整原生总量、桥接发行总量、桥池锁仓总量和有符号差额；没有 `eth_getLogs`、trace/debug 请求。
 
-- [ ] **Step 6: 更新计划勾选状态并提交验证记录**
+- [x] **Step 6: 更新计划勾选状态并提交验证记录**
 
 ```bash
 git add docs/superpowers/plans/2026-09-10-full-multichain-supply-reconciliation.md
