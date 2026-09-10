@@ -1,77 +1,111 @@
-# EVM RPC 调用量优化设计
+# EVM 权限监控降频设计
 
 ## 目标
 
-在不降低现有风险覆盖、重组检测能力和告警语义的前提下，减少 EVM 监控对 Ethereum 与 BNB Chain RPC 的重复调用，重点消除每轮扫描对未变化重叠区块的完整重复分析。
+将 Ethereum 与 BNB Chain 的链上监控从逐区块完整交易分析，调整为每 10 分钟一次的合约权限、关键运行状态和关键事件检查。保留对 USD1 合约控制权及发行风险最直接的信号，同时把本项目的链上 RPC 调用量控制在约 10 万至 15 万次/月，远低于 500 万次/月硬上限。
 
-## 当前问题
+## 保留的监控
 
-每条链会按配置周期扫描新区块，并重复覆盖最近 20 个区块以处理链重组。`PrivilegedCallCollector` 当前对扫描范围内的每个区块都重新执行：
+每条链每 10 分钟读取一次确认区块上的当前状态：
 
-- `eth_getBlockByNumber(..., true)`；
-- 一次 `eth_getStorageAt`；
-- 两次 `eth_call` 读取 token owner 和 admin owner。
+- EIP-1967 implementation 地址；
+- implementation 代码哈希；
+- EIP-1967 admin 地址；
+- token owner 地址；
+- ProxyAdmin owner 地址（admin 合约实现 `owner()` 时）；
+- paused 状态；
+- 配置了 `watched_addresses` 时，对这些地址读取 frozen 状态。
 
-因此，即使重叠区块的哈希没有变化，也会重复下载完整交易并读取历史权限状态。追赶阶段每轮扫描 60 个区块时，单链约产生 252 次 RPC 调用；正常阶段的 20 个重叠区块也会在每轮重复产生约 80 次调用。
+同时按游标连续读取 USD1 合约日志，保留：
 
-## 选定方案
+- implementation、admin、owner 变化；
+- pause、unpause；
+- freeze、unfreeze；
+- mint、burn，其中单次达到现有阈值的大额铸造或销毁继续告警。
 
-复用现有 `chain_block_hashes` 数据，对已处理过的重叠区块进行哈希感知的快速检查。
+日志检查保留重叠区块对账，从而纠正确认窗口附近的链重组事件。
 
-1. `Storage` 提供按链和区块范围读取已保存哈希，以及按指定区块读取已落库特权事件的只读方法，不修改数据库结构。
-2. `EvmChainMonitor` 在执行特权调用扫描前读取当前扫描范围内的已保存哈希，并传给 `PrivilegedCallCollector`。
-3. `PrivilegedCallCollector` 对存在已保存哈希的区块先调用 `eth_getBlockByNumber(..., false)`：
-   - 返回哈希与已保存哈希一致时，将该哈希继续纳入本轮重组检查，但跳过完整区块、历史 admin/owner 和交易回执查询，并把该区块已落库的特权事件加入本轮 canonical 事件集合，防止事件对账误删。
-   - 返回哈希不一致时，视为可能发生重组，使用 `eth_getBlockByNumber(..., true)` 重新读取完整区块，并按现有逻辑重新读取历史权限状态、识别特权调用。
-4. 对没有已保存哈希的新区块，完整执行现有扫描逻辑。
-5. 后续事务仍使用现有 `block_hash_reorg_from`、回滚、事件重放和区块哈希写入流程。
+风险等级沿用现有规则：implementation、代码哈希或 admin 地址变化为 RED，token owner 变化为 YELLOW，paused 为 RED，普通地址冻结为 YELLOW、受监控地址冻结为 RED，大额 mint/burn 为 YELLOW。新增的 ProxyAdmin owner 变化按 RED 处理，因为该身份可控制代理升级。
 
-该方案不缓存或推导 admin/owner 状态，不减少新区块检查，也不缩短重组覆盖范围，因此不会引入因状态推断或降低确认范围造成的漏报。
+## 停止的监控
 
-## 数据流
+运行时不再启用 `PrivilegedCallCollector`，因此停止：
 
-每轮扫描的数据流如下：
+- 下载每个区块的完整交易列表；
+- 对每个区块读取历史 admin、token owner 和 admin owner；
+- 逐笔识别已知高权限函数调用；
+- 识别没有对应状态变化或已知事件的未知高权限调用；
+- 读取候选交易的交易回执和 Safe 内层调用。
 
-1. `EvmScanner` 确定扫描起止区块并获取 USD1 日志。
-2. `EvmChainMonitor` 从 `chain_block_hashes` 读取同一范围的已知哈希。
-3. `PrivilegedCallCollector` 并发获取区块：
-   - 已知区块先取轻量区块头；
-   - 哈希相同则标记为未变化；
-   - 哈希变化或未知区块进入原有完整分析。
-4. collector 返回本轮新识别的特权事件、未变化区块集合和全部已检查区块的当前哈希。
-5. `EvmChainMonitor` 读取未变化区块中已落库的特权事件，与本轮日志和新识别事件合并为 canonical 事件集合。
-6. monitor 比较哈希、必要时回滚，从 canonical 结果重建事件，再原子写入游标和哈希。
+这意味着无事件、未留下最终状态变化，并且在两个 10 分钟检查点之间发生后又恢复的临时权限操作可能不会被发现。该边界是满足成本约束的明确取舍，不得在实现或文案中表述为逐笔完整链上审计。
 
-## 正确性边界
+## 扫描策略
 
-- 已知哈希相同意味着区块及父链未变化，之前落库的特权事件仍是 canonical，无需重复识别。
-- 区块哈希与事件在现有事务中原子写入；因此有已知哈希的未变化区块可以安全复用同一事务落库的特权事件。
-- 已知哈希变化时必须完整重扫，不允许使用旧事件或旧权限状态。
-- 数据库中缺少哈希时必须走完整扫描，保证升级部署后的首轮行为安全。
-- 轻量区块响应、完整区块响应或哈希格式异常时，沿用现有失败语义并终止本轮，不静默跳过。
-- RPC 错误继续保留原异常上下文，由现有健康检查和日志路径处理。
+1. 两条链的 `interval_seconds` 统一调整为 600。
+2. 每轮先读取 `eth_blockNumber` 并计算确认后的 safe head。
+3. 日志扫描从持久化游标减去重叠区块开始，到 safe head 为止。
+4. 单轮最多推进 2,000 个区块，确保 BSC 在约 0.45 秒出块时仍能追上每 10 分钟约 1,333 个新区块。
+5. `eth_getLogs` 每次最多查询 500 个区块，避免单次响应过大；一轮正常 BSC 约 3 次日志请求，Ethereum 约 1 次。日志解码覆盖标准 `Upgraded` 和 `AdminChanged` 事件。
+6. 日志完成后在本轮 processed head 读取权限与运行状态快照，包括 token owner 和 ProxyAdmin owner。
+7. 原子完成事件对账、观察值写入、风险状态更新和游标推进。任一 RPC 或解析失败时不推进游标。
 
-## 接口和文件范围
+## 重组与错误处理
 
-修改范围限定为：
+- 保留确认深度和 20 个重叠区块，不使用逐块完整交易来检测重组。
+- 对重叠范围重新获取 canonical 日志；数据库中已不存在的旧日志事件由现有事件对账删除并触发对应恢复处理。
+- 当前状态始终从本轮确认区块重新读取，避免沿用内存推导状态。
+- RPC 限流、超时、不支持历史读取或响应格式异常继续使本轮失败，并记录健康状态与完整错误上下文。
+- 不添加静默降级；日志或状态检查失败时不得把链标记为采集成功。
 
-- `usd1_monitor/storage.py`：增加已有区块哈希范围查询和指定区块的特权事件查询。
-- `usd1_monitor/collectors/evm.py`：支持已知哈希输入和未变化区块快速路径。
-- `usd1_monitor/scheduler.py`：连接存储查询与 collector。
-- `tests/test_storage.py`、`tests/test_evm_snapshot.py`、`tests/test_evm_integration.py`：增加回归测试。
+## 调用量预算
 
-不修改配置格式、数据库表结构、风险规则、通知内容、扫描周期、确认深度或重叠区块数量。
+正常每 10 分钟一轮时：
+
+- BNB Chain：约 10 次 RPC/轮，约 43,200 次/月；
+- Ethereum：约 8 次 RPC/轮，约 34,560 次/月；
+- 现有 PoR：约 34,560 次/月；
+- 两条链供应量：约 5,760 次/月。
+
+合计约 118,080 次/月。即使按所有请求均发生两次重试的极端上界估算，也低于 36 万次/月。每增加一个受监控冻结地址，约增加 4,320 次/月。该预算不包含非 RPC 的 Binance 市场和官方网页请求。
+
+## 配置和兼容性
+
+更新默认示例配置：
+
+- Ethereum 和 BNB Chain 的 `interval_seconds` 设为 600；
+- `scan_batch_blocks` 设为 2,000；
+- 日志查询块跨度设为 500，并由链配置显式承载。
+
+现有数据库表和数据继续使用，不执行迁移。旧游标可继续推进。环境变量中的 RPC URL 格式不变。
+
+启动通知中的“Ethereum 链上合约、BNB Chain 链上合约”改为“Ethereum 合约权限、BNB Chain 合约权限”，避免让用户误以为仍在逐笔分析全部链上交易。
+
+## 文件范围
+
+- `usd1_monitor/config.py`：允许新的扫描批量上限并增加日志块跨度配置。
+- `config.example.yaml`：写入 10 分钟周期、2,000 区块批量和 500 区块日志跨度。
+- `deploy/config.production.example.yaml`：同步生产部署示例中的周期和扫描参数。
+- `usd1_monitor/collectors/evm.py`：使用链配置的日志跨度；保留日志扫描与状态快照，运行时不再依赖逐区块特权调用扫描。
+- `usd1_monitor/evm_abi.py`：解析标准 `Upgraded` 和 `AdminChanged` 事件。
+- `usd1_monitor/scheduler.py`：持久化、比较并评估 ProxyAdmin owner 快照。
+- `usd1_monitor/cli.py`：不再向生产 monitor 注入 `PrivilegedCallCollector`。
+- `usd1_monitor/notifications/wechat.py`：只调整启动覆盖名称。
+- `README.md`：说明已有部署需要手动更新周期和扫描参数。
+- `tests/test_config.py`、`tests/test_evm_abi.py`、`tests/test_evm_scanner.py`、`tests/test_evm_snapshot.py`、`tests/test_evm_integration.py`、`tests/test_cli.py`、`tests/test_wechat.py`：覆盖配置、调用数量、事件与状态行为及启动文案。
+
+不修改数据库结构、价格规则、PoR、供应量、公告采集和通知发送机制。不在本次修改中增加其他链或网页仪表盘。
 
 ## 测试与验收
 
 测试必须先失败再实现，并覆盖：
 
-1. 范围查询只返回指定链、指定区块范围内的哈希。
-2. 已知哈希一致时只请求轻量区块，不请求完整区块、历史权限状态或交易回执。
-3. 已知哈希变化时完整重扫并保留现有特权事件识别结果。
-4. 未知新区块维持现有完整扫描行为。
-5. 未变化区块已有的特权事件进入 canonical 事件集合，不会被事件对账删除或重复告警。
-6. 混合范围中所有区块哈希仍传给现有重组检测。
-7. 现有重组、事件回滚、权限调用识别和完整测试套件全部通过。
-
-预期正常运行 RPC 调用量下降约 40%～65%；追赶期间下降约 24%。验收以方法调用计数测试和现有功能回归为准，不依赖特定 RPC 服务商的计费口径。
+1. BSC 每 10 分钟约 1,333 个新区块时，单轮游标能够前进到 safe head，而不是持续落后。
+2. 2,000 个区块的扫描按 500 个区块拆成 4 次 `eth_getLogs`。
+3. 生产 builder 不创建或注入 `PrivilegedCallCollector`，因此不调用完整区块、逐块历史权限和 Trace/Debug 方法。
+4. implementation、代码哈希、admin、owner、paused 和 watched frozen 状态变化继续产生原有风险级别。
+5. ProxyAdmin owner 首次读取建立基线，后续变化触发 RED；无法读取 owner 的非 Ownable admin 保持 `None`，不产生伪告警。
+6. 权限、暂停、冻结、mint 和 burn 日志继续被识别；大额 mint/burn 阈值保持不变。
+7. 重叠日志对账继续移除重组后的孤儿事件。
+8. RPC 失败不推进游标，并通过现有健康检查暴露。
+9. 启动通知明确显示“合约权限”。
+10. 完整测试套件通过，且测试中的 RPC 方法计数符合月预算模型。
