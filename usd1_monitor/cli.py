@@ -98,6 +98,7 @@ def build_market_monitor(
             confirmation_depth=chain_config.confirmation_depth,
             overlap_blocks=chain_config.overlap_blocks,
             batch_blocks=chain_config.scan_batch_blocks,
+            log_query_chunk_blocks=chain_config.log_query_chunk_blocks,
             token_address=chain_config.token_address,
         )
         evm_chains.append(

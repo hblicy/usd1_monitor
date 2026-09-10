@@ -82,18 +82,22 @@ class EvmScanner:
         confirmation_depth: int,
         overlap_blocks: int,
         batch_blocks: int,
+        log_query_chunk_blocks: int = EVM_LOG_QUERY_CHUNK_BLOCKS,
         token_address: str = USD1_TOKEN_ADDRESS,
     ) -> None:
         if confirmation_depth < 0 or overlap_blocks < 1 or batch_blocks < 1:
             raise ValueError("invalid EVM scanner range configuration")
         if batch_blocks <= overlap_blocks:
             raise ValueError("batch_blocks must be larger than overlap_blocks")
+        if log_query_chunk_blocks < 1:
+            raise ValueError("log_query_chunk_blocks must be positive")
         self.chain = chain
         self._rpc = rpc
         self._storage = storage
         self._confirmation_depth = confirmation_depth
         self._overlap_blocks = overlap_blocks
         self._batch_blocks = batch_blocks
+        self._log_query_chunk_blocks = log_query_chunk_blocks
         self._token_address = token_address
 
     async def scan_once(self) -> ScanResult:
@@ -114,9 +118,11 @@ class EvmScanner:
         start, end = current_range
         end = min(end, start + self._batch_blocks - 1)
         candidate_events: list[ChainEvent] = []
-        for batch_start in range(start, end + 1, EVM_LOG_QUERY_CHUNK_BLOCKS):
+        for batch_start in range(
+            start, end + 1, self._log_query_chunk_blocks
+        ):
             batch_end = min(
-                end, batch_start + EVM_LOG_QUERY_CHUNK_BLOCKS - 1
+                end, batch_start + self._log_query_chunk_blocks - 1
             )
             raw_logs = await self._rpc.call(
                 "eth_getLogs",

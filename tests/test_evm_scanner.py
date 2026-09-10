@@ -102,6 +102,39 @@ async def test_scanner_chunks_log_queries_without_reducing_cycle_progress(
 
 
 @pytest.mark.asyncio
+async def test_scanner_chunks_two_thousand_blocks_into_four_queries(
+    storage,
+) -> None:
+    fake_rpc = FakeRpc()
+    await storage.set_scan_cursor("bsc", 100)
+    fake_rpc.result("eth_blockNumber", hex(2_090))
+    for _ in range(4):
+        fake_rpc.result("eth_getLogs", [])
+    scanner = EvmScanner(
+        "bsc",
+        fake_rpc,
+        storage,
+        confirmation_depth=10,
+        overlap_blocks=20,
+        batch_blocks=2_000,
+        log_query_chunk_blocks=500,
+    )
+
+    result = await scanner.scan_once()
+
+    requests = [params[0] for params in fake_rpc.calls_for("eth_getLogs")]
+    assert [
+        (request["fromBlock"], request["toBlock"]) for request in requests
+    ] == [
+        (hex(81), hex(580)),
+        (hex(581), hex(1_080)),
+        (hex(1_081), hex(1_580)),
+        (hex(1_581), hex(2_080)),
+    ]
+    assert result.cursor == result.safe_head == 2_080
+
+
+@pytest.mark.asyncio
 async def test_scanner_rejects_safe_head_behind_persisted_cursor(storage) -> None:
     fake_rpc = FakeRpc()
     await storage.set_scan_cursor("ethereum", 100)
