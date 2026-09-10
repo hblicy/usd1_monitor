@@ -32,17 +32,28 @@ BSC_RPC_URLS=https://bsc-primary.example,https://bsc-backup.example
 
 Linux 上执行 `chmod 600 .env` 或 `/etc/usd1-monitor.env`。不要提交 `.env`、真实 webhook、带密钥的 RPC URL、数据库或日志。
 
-三个命令：
+四个命令：
 
 ```bash
 python -m usd1_monitor --config config.yaml check
 python -m usd1_monitor --config config.yaml run
 python -m usd1_monitor --config config.yaml status
+python -m usd1_monitor --config config.yaml dashboard
 ```
 
 - `check`：只读执行一次全部采集，不发送企业微信；所有必需采集器成功才返回 0，DefiLlama 仅为辅助来源。
 - `run`：常驻调度。未配置 webhook 时仍运行，但日志明确显示通知已禁用。
 - `status`：打开并兼容初始化 SQLite（不采集外部数据、不发送通知），显示业务风险、采集器健康、最近链上事实、官方信息和未监控项。
+- `dashboard`：以只读方式打开已有 SQLite，在 `127.0.0.1:8080` 提供网页总览；不采集外部数据、不发送通知、不会创建或迁移数据库。
+
+网页端口可在配置文件中修改，但监听地址固定为本机：
+
+```yaml
+dashboard:
+  port: 8080
+```
+
+首次读取失败时，网页显示“未知”，不会把缺少数据解释为绿色；后续刷新失败会保留上一屏成功数据并明确提示内容可能过期。
 
 ## 告警语义
 
@@ -74,13 +85,12 @@ python -m usd1_monitor --config config.yaml status
 - `binance_wallet_concentration`
 - `social_media_sentiment`
 - `defi_liquidations`
-- `web_dashboard`
 
 这些未覆盖项不应被解释为绿色。`tron_solana_aptos_tempo_bridges` 指逐笔跨链交易追踪；本程序目前只核对供应量和桥池余额。政治/社交信号保留人工判断，不自动触发交易动作。
 
 ## Linux systemd 部署
 
-生产配置模板为 `deploy/config.production.example.yaml`，服务单元为 `deploy/usd1-monitor.service`。
+生产配置模板为 `deploy/config.production.example.yaml`，监控服务单元为 `deploy/usd1-monitor.service`，只读网页服务单元为 `deploy/usd1-dashboard.service`。
 
 ```bash
 sudo useradd --system --home /opt/usd1-monitor --shell /usr/sbin/nologin usd1-monitor
@@ -93,11 +103,22 @@ sudo cp deploy/config.production.example.yaml /etc/usd1-monitor.yaml
 sudo cp .env.example /etc/usd1-monitor.env
 sudo chmod 600 /etc/usd1-monitor.env
 sudo cp deploy/usd1-monitor.service /etc/systemd/system/
+sudo cp deploy/usd1-dashboard.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now usd1-monitor
+sudo systemctl enable --now usd1-dashboard
 sudo systemctl status usd1-monitor
+sudo systemctl status usd1-dashboard
 sudo journalctl -u usd1-monitor -f
 ```
+
+网页服务固定监听 `127.0.0.1`，不能直接从公网访问，也不提供登录功能。在自己的电脑建立 SSH 隧道：
+
+```bash
+ssh -L 8080:127.0.0.1:8080 ubuntu@服务器IP
+```
+
+保持该 SSH 会话打开，然后在本机浏览器访问 `http://127.0.0.1:8080`。若修改了 `dashboard.port`，隧道命令两处端口和浏览器地址需要同步修改。网页服务只读数据库，停止或重启它不会影响监控采集和企业微信通知。
 
 应用日志默认在 `/var/log/usd1-monitor/monitor.log`，SQLite 在 `/var/lib/usd1-monitor/monitor.db`。数据库在线备份使用 SQLite 自带命令，避免直接复制 WAL 中的活跃数据库：
 
