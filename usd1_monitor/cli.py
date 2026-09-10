@@ -24,7 +24,13 @@ from usd1_monitor.collectors.market import BinanceMarketCollector
 from usd1_monitor.collectors.reserves import PorCollector
 from usd1_monitor.collectors.supply import (
     DefiLlamaSupplyCollector,
-    NativeSupplyCollector,
+)
+from usd1_monitor.collectors.multichain_evm import EvmChainSupplyCollector
+from usd1_monitor.collectors.multichain_supply import MultichainSupplySource
+from usd1_monitor.collectors.non_evm_supply import (
+    AptosSupplyCollector,
+    SolanaSupplyCollector,
+    TronSupplyCollector,
 )
 from usd1_monitor.config import AppConfig, ConfigError, load_config
 from usd1_monitor.http import AsyncHttpClient
@@ -46,6 +52,12 @@ from usd1_monitor.engine.aggregate import business_overall, health_overall
 from usd1_monitor.models import RiskLevel
 from usd1_monitor.time_utils import local_iso
 from usd1_monitor.storage import Storage
+from usd1_monitor.supply_assets import (
+    BRIDGED_EVM_SPECS,
+    EVM_CHAIN_IDS,
+    LOCKED_EVM_SPECS,
+    NATIVE_EVM_SPECS,
+)
 
 
 class Closable(Protocol):
@@ -117,6 +129,55 @@ def build_market_monitor(
             )
         )
     ethereum = config.chains.ethereum
+    supply_specs = (
+        *NATIVE_EVM_SPECS,
+        *BRIDGED_EVM_SPECS,
+        *LOCKED_EVM_SPECS,
+    )
+    specs_by_chain = {
+        chain_name: tuple(
+            spec for spec in supply_specs if spec.scope == chain_name
+        )
+        for chain_name in EVM_CHAIN_IDS
+    }
+    multichain_config = config.supply.multichain
+    for chain_name in EVM_CHAIN_IDS:
+        if chain_name in rpc_by_chain:
+            continue
+        rpc_by_chain[chain_name] = JsonRpcClient(
+            getattr(multichain_config, f"{chain_name}_rpc_urls"),
+            http,
+            expected_chain_id=EVM_CHAIN_IDS[chain_name],
+        )
+    evm_supply_collectors = [
+        EvmChainSupplyCollector(
+            chain_name,
+            rpc_by_chain[chain_name],
+            specs=specs_by_chain[chain_name],
+            confirmation_depth=(
+                getattr(config.chains, chain_name).confirmation_depth
+                if chain_name in {"ethereum", "bsc"}
+                else 0
+            ),
+        )
+        for chain_name in EVM_CHAIN_IDS
+    ]
+    multichain = MultichainSupplySource(
+        [
+            *evm_supply_collectors,
+            TronSupplyCollector(
+                http,
+                multichain_config.tron_rpc_urls,
+            ),
+            SolanaSupplyCollector(
+                JsonRpcClient(multichain_config.solana_rpc_urls, http)
+            ),
+            AptosSupplyCollector(
+                http,
+                multichain_config.aptos_indexer_urls,
+            ),
+        ]
+    )
     reserve_supply = ReserveSupplyMonitor(
         ConfirmedPorSource(
             rpc_by_chain["ethereum"],
@@ -124,18 +185,7 @@ def build_market_monitor(
             ethereum.confirmation_depth,
         ),
         CombinedSupplySource(
-            [
-                (
-                    rpc_by_chain[chain_name],
-                    NativeSupplyCollector(
-                        chain_name,
-                        rpc_by_chain[chain_name],
-                        getattr(config.chains, chain_name).token_address,
-                    ),
-                    getattr(config.chains, chain_name).confirmation_depth,
-                )
-                for chain_name in ("ethereum", "bsc")
-            ],
+            multichain,
             DefiLlamaSupplyCollector(
                 http,
                 url=config.supply.defillama_url,
@@ -313,6 +363,24 @@ async def _print_status(
         ("por.reserves", "ethereum"),
         ("supply.native", "ethereum"),
         ("supply.native", "bsc"),
+        ("supply.native", "tron"),
+        ("supply.native", "solana"),
+        ("supply.native", "aptos"),
+        ("supply.native", "tempo"),
+        ("supply.bridged", "plume"),
+        ("supply.bridged", "ab"),
+        ("supply.bridged", "monad"),
+        ("supply.bridged", "mantle"),
+        ("supply.bridged", "morph"),
+        ("bridge.locked", "ethereum"),
+        ("bridge.locked", "bsc"),
+        ("bridge.locked", "solana"),
+        ("bridge.locked", "aptos"),
+        ("bridge.locked", "tempo"),
+        ("supply.multichain_total", "global"),
+        ("supply.bridged_total", "global"),
+        ("bridge.locked_total", "global"),
+        ("bridge.issuance_delta", "global"),
         ("supply.global", "global"),
         ("supply.estimated_collateralization", "global"),
     )

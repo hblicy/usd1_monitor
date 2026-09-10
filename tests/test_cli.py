@@ -5,6 +5,7 @@ import pytest
 
 from usd1_monitor.cli import async_main, build_market_monitor
 from usd1_monitor.collectors.announcements import BinancePartialCollectionError
+from usd1_monitor.collectors.multichain_supply import REQUIRED_COMPONENT_IDS
 from usd1_monitor.config import AppConfig
 from usd1_monitor.models import Announcement
 from usd1_monitor.scheduler import CheckResult, NOT_MONITORED
@@ -23,6 +24,20 @@ class FakeMonitor:
 class FakeHttp:
     async def close(self) -> None:
         return None
+
+
+def test_builder_wires_all_multichain_supply_sources(
+    storage,
+    tmp_path: Path,
+) -> None:
+    config = AppConfig(database_path=tmp_path / "monitor.db")
+
+    monitor, resource = build_market_monitor(config, storage)
+
+    source = monitor._reserve_supply._supply._multichain
+    assert source.required_component_ids == REQUIRED_COMPONENT_IDS
+    assert source.max_concurrency == 4
+    assert resource is not None
 
 
 def write_config(path: Path, database_path: Path) -> None:

@@ -79,7 +79,6 @@ NOT_MONITORED = (
     "social_media_sentiment",
     "defi_liquidations",
     "web_dashboard",
-    "full_multichain_supply_reconciliation",
 )
 
 MUTABLE_EVM_EVENT_TYPES = (
@@ -1297,6 +1296,7 @@ class Usd1Monitor:
         )
         if self._reserve_supply is not None:
             monitored.append("储备与供应量")
+            monitored.append("完整多链供应量与桥接核对")
         if self._information is not None:
             monitored.append("官方公告")
         try:
@@ -1586,10 +1586,50 @@ class ReserveSupplyMonitor:
             supplies = batch.snapshots
             await self._persist_supplies(batch, checked_at)
             details: list[str] = []
+            aggregate_values: dict[str, float] = {}
             for supply in supplies:
+                metric = supply.observation.metric
+                if metric == "supply.native":
+                    details.append(
+                        f"supply_native {supply.scope}={supply.supply:g}"
+                    )
+                elif metric == "supply.bridged":
+                    details.append(
+                        f"supply_bridged {supply.scope}={supply.supply:g}"
+                    )
+                elif metric == "bridge.locked":
+                    details.append(
+                        f"bridge_locked {supply.scope}={supply.supply:g}"
+                    )
+                elif metric in {
+                    "supply.multichain_total",
+                    "supply.bridged_total",
+                    "bridge.locked_total",
+                    "bridge.issuance_delta",
+                }:
+                    aggregate_values[metric] = supply.supply
+                elif metric == "supply.global":
+                    details.append(
+                        f"supply_defillama global={supply.supply:g}"
+                    )
+            if "supply.multichain_total" in aggregate_values:
                 details.append(
-                    f"supply {supply.scope}={supply.supply} "
-                    f"quality={supply.observation.quality}"
+                    "supply_multichain total="
+                    f"{aggregate_values['supply.multichain_total']:g}"
+                )
+            if all(
+                metric in aggregate_values
+                for metric in (
+                    "supply.bridged_total",
+                    "bridge.locked_total",
+                    "bridge.issuance_delta",
+                )
+            ):
+                details.append(
+                    "bridge_reconciliation "
+                    f"issued={aggregate_values['supply.bridged_total']:g} "
+                    f"locked={aggregate_values['bridge.locked_total']:g} "
+                    f"delta={aggregate_values['bridge.issuance_delta']:g}"
                 )
 
             errors_by_id = {

@@ -9,6 +9,9 @@ def test_example_config_is_loadable() -> None:
     assert set(config.chains.model_dump()) == {"ethereum", "bsc"}
     assert config.por.interval_seconds == 300
     assert config.information.binance.interval_seconds == 900
+    assert config.supply.multichain.tempo_rpc_urls == [
+        "https://rpc.presto.tempo.xyz"
+    ]
 
 
 def test_examples_use_ten_minute_permission_monitoring() -> None:

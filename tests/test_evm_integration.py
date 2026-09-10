@@ -1012,6 +1012,8 @@ async def test_composite_startup_notification_uses_plain_chinese(storage) -> Non
     assert "BNB Chain 合约权限" in message
     assert "链上合约" not in message
     assert "储备与供应量" in message
+    assert "完整多链供应量与桥接核对" in message
+    assert "暂未覆盖：\n完整多链供应量核对" not in message
     assert "官方公告" in message
     for hidden in ("enabled_collectors", "NOT_MONITORED", "evm_bsc"):
         assert hidden not in message

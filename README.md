@@ -1,6 +1,6 @@
 # USD1 公开数据风险监控器
 
-这是一个只读监控程序：不需要交易所 API Key 或钱包私钥，不下单、不兑换、不执行资产操作。它监控 Binance 公开盘口、Ethereum/BNB Chain 合约权限与供应、USD1 PoR Oracle、DefiLlama 估算全链供应，以及 Binance、BitGo、WLFI、OCC 官方页面；状态变化和恢复可通过企业微信机器人通知。
+这是一个只读监控程序：不需要交易所 API Key 或钱包私钥，不下单、不兑换、不执行资产操作。它监控 Binance 公开盘口、Ethereum/BNB Chain 合约权限、USD1 PoR Oracle、完整多链供应量与桥池余额、DefiLlama 辅助估算，以及 Binance、BitGo、WLFI、OCC 官方页面；状态变化和恢复可通过企业微信机器人通知。
 
 ## 本地运行
 
@@ -27,6 +27,7 @@ Windows 可用 `Copy-Item` 代替 `cp`。按部署环境修改 `config.yaml`，�
 WECHAT_WEBHOOK=https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=...
 ETH_RPC_URLS=https://eth-primary.example,https://eth-backup.example
 BSC_RPC_URLS=https://bsc-primary.example,https://bsc-backup.example
+# 其他链也可使用逗号分隔的 *_RPC_URLS 覆盖，详见 .env.example
 ```
 
 Linux 上执行 `chmod 600 .env` 或 `/etc/usd1-monitor.env`。不要提交 `.env`、真实 webhook、带密钥的 RPC URL、数据库或日志。
@@ -39,7 +40,7 @@ python -m usd1_monitor --config config.yaml run
 python -m usd1_monitor --config config.yaml status
 ```
 
-- `check`：只读执行一次全部采集，不发送企业微信；所有启用的采集器成功才返回 0。
+- `check`：只读执行一次全部采集，不发送企业微信；所有必需采集器成功才返回 0，DefiLlama 仅为辅助来源。
 - `run`：常驻调度。未配置 webhook 时仍运行，但日志明确显示通知已禁用。
 - `status`：打开并兼容初始化 SQLite（不采集外部数据、不发送通知），显示业务风险、采集器健康、最近链上事实、官方信息和未监控项。
 
@@ -55,11 +56,15 @@ python -m usd1_monitor --config config.yaml status
 - 官方信息事件超过观察窗口时静默转为绿色，不发送逐条“event window expired”通知；真正的规则恢复仍通知。
 - 采集器连续失败 3 次为黄色监控盲区；Binance 盘口或 PoR 在已有成功记录后超过 15 分钟无成功观测为红色盲区。
 - 企业微信 HTTP 200 仍检查业务 `errcode`；失败最多尝试两次，未成功不会标记为已送达。
-- `FACT` 是直接链上/交易所事实；`ESTIMATED_SOURCE` 是外部估算来源；`ESTIMATED` 是 `PoR reserves / DefiLlama global supply` 的辅助比率，不是完整多链审计结论。
+- `FACT` 是直接链上/交易所事实；`ESTIMATED_SOURCE` 是外部估算来源；`ESTIMATED` 是 `PoR reserves / supply.multichain_total` 的覆盖率估算，不是审计结论。
 
 ## 数据源与边界
 
-公开数据源：Binance Spot REST、Ethereum/BNB Chain JSON-RPC、WLFI PoR Oracle、DefiLlama stablecoins API、Binance/BitGo/WLFI/OCC 官方页面。
+公开数据源：Binance Spot REST、各链 JSON-RPC/公开索引器、WLFI PoR Oracle、DefiLlama stablecoins API、Binance/BitGo/WLFI/OCC 官方页面。
+
+完整供应量每小时核对一次：原生供应量包含 Ethereum、BNB Chain、Tron、Solana、Aptos、Tempo；桥接发行量包含 Plume、AB Core、Monad、Mantle、Morph；同时核对 Ethereum、BNB Chain、Solana、Aptos、Tempo 的 CCIP 桥池余额。总供应量只汇总 6 条原生链，避免把桥接发行重复计算。正常一轮少于 30 个 RPC/HTTP 响应，不使用 `eth_getLogs`、trace 或 debug 方法。
+
+`TRON_RPC_URLS`、`SOLANA_RPC_URLS`、`APTOS_INDEXER_URLS`、`TEMPO_RPC_URLS`、`PLUME_RPC_URLS`、`AB_RPC_URLS`、`MONAD_RPC_URLS`、`MANTLE_RPC_URLS`、`MORPH_RPC_URLS` 都支持在 `.env` 中用英文逗号配置多个端点。
 
 以下能力会在 `status` 中明确列为 `NOT_MONITORED`：
 
@@ -70,9 +75,8 @@ python -m usd1_monitor --config config.yaml status
 - `social_media_sentiment`
 - `defi_liquidations`
 - `web_dashboard`
-- `full_multichain_supply_reconciliation`
 
-它们不应被解释为绿色或已覆盖。政治/社交信号保留人工判断，不自动触发交易动作。
+这些未覆盖项不应被解释为绿色。`tron_solana_aptos_tempo_bridges` 指逐笔跨链交易追踪；本程序目前只核对供应量和桥池余额。政治/社交信号保留人工判断，不自动触发交易动作。
 
 ## Linux systemd 部署
 

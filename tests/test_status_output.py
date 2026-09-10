@@ -19,10 +19,50 @@ def test_status_names_every_non_monitored_capability() -> None:
         "social_media_sentiment",
         "defi_liquidations",
         "web_dashboard",
-        "full_multichain_supply_reconciliation",
     }
 
     assert set(NOT_MONITORED) == expected
+
+
+def test_full_multichain_reconciliation_is_no_longer_not_monitored() -> None:
+    assert "full_multichain_supply_reconciliation" not in NOT_MONITORED
+    assert "tron_solana_aptos_tempo_bridges" in NOT_MONITORED
+
+
+@pytest.mark.asyncio
+async def test_status_prints_multichain_aggregate_metrics(
+    storage,
+    capsys,
+) -> None:
+    now = datetime(2026, 9, 10, tzinfo=UTC)
+    for metric, value in (
+        ("supply.multichain_total", 4_200_000_000),
+        ("supply.bridged_total", 1_250_000_000),
+        ("bridge.locked_total", 1_249_650_000),
+        ("bridge.issuance_delta", 350_000),
+    ):
+        await storage.insert_observation(
+            Observation(
+                metric,
+                "onchain_multichain",
+                "global",
+                value,
+                "USD1",
+                now,
+                now,
+            )
+        )
+
+    await _print_status(storage)
+
+    output = capsys.readouterr().out
+    for metric in (
+        "supply.multichain_total",
+        "supply.bridged_total",
+        "bridge.locked_total",
+        "bridge.issuance_delta",
+    ):
+        assert f"metric {metric}: FACT" in output
 
 
 @pytest.mark.asyncio
