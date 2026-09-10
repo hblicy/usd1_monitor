@@ -1,4 +1,12 @@
-from usd1_monitor.engine.supply_rules import SupplyRiskInput, evaluate_supply
+import pytest
+
+from usd1_monitor.engine.supply_rules import (
+    BridgeDirection,
+    BridgeReading,
+    SupplyRiskInput,
+    evaluate_bridge_reconciliation,
+    evaluate_supply,
+)
 from usd1_monitor.models import CoverageState, RiskLevel
 
 
@@ -82,3 +90,108 @@ def test_coverage_recovery_requires_two_good_hourly_points() -> None:
 
     assert first.coverage_level is RiskLevel.YELLOW
     assert second.coverage_level is RiskLevel.GREEN
+
+
+def bridge(issued: float, locked: float) -> BridgeReading:
+    return BridgeReading(issued=issued, locked=locked)
+
+
+def test_overissued_requires_two_points_above_both_yellow_thresholds(
+) -> None:
+    one = evaluate_bridge_reconciliation(
+        [bridge(100_200_000, 100_000_000)],
+        RiskLevel.GREEN,
+    )
+    two = evaluate_bridge_reconciliation(
+        [bridge(100_200_000, 100_000_000)] * 2,
+        RiskLevel.GREEN,
+    )
+
+    assert one.level is RiskLevel.GREEN
+    assert two.level is RiskLevel.YELLOW
+    assert two.direction is BridgeDirection.OVERISSUED
+
+
+def test_red_requires_two_red_points_not_one_yellow_then_one_red() -> None:
+    result = evaluate_bridge_reconciliation(
+        [
+            bridge(100_200_000, 100_000_000),
+            bridge(102_000_000, 100_000_000),
+        ],
+        RiskLevel.YELLOW,
+    )
+
+    assert result.level is RiskLevel.YELLOW
+
+
+def test_locked_excess_never_becomes_red() -> None:
+    result = evaluate_bridge_reconciliation(
+        [bridge(100_000_000, 102_000_000)] * 2,
+        RiskLevel.GREEN,
+    )
+
+    assert result.level is RiskLevel.YELLOW
+    assert result.direction is BridgeDirection.LOCKED_EXCESS
+
+
+def test_abnormal_state_needs_two_normal_points_to_recover() -> None:
+    first = evaluate_bridge_reconciliation(
+        [
+            bridge(102_000_000, 100_000_000),
+            bridge(100_050_000, 100_000_000),
+        ],
+        RiskLevel.YELLOW,
+    )
+    second = evaluate_bridge_reconciliation(
+        [bridge(100_050_000, 100_000_000)] * 2,
+        RiskLevel.YELLOW,
+    )
+
+    assert first.level is RiskLevel.YELLOW
+    assert second.level is RiskLevel.GREEN
+
+
+@pytest.mark.parametrize(
+    ("reading", "expected"),
+    [
+        (bridge(100_100_000, 100_000_000), RiskLevel.GREEN),
+        (bridge(101_000_000, 100_000_000), RiskLevel.YELLOW),
+        (bridge(100_000_000, 101_000_000), RiskLevel.GREEN),
+    ],
+)
+def test_bridge_exact_boundaries_follow_strict_severity_thresholds(
+    reading: BridgeReading,
+    expected: RiskLevel,
+) -> None:
+    result = evaluate_bridge_reconciliation(
+        [reading, reading],
+        RiskLevel.GREEN,
+    )
+
+    assert result.level is expected
+
+
+def test_zero_denominators_follow_approved_asymmetric_rules() -> None:
+    overissued = evaluate_bridge_reconciliation(
+        [bridge(1, 0), bridge(1, 0)],
+        RiskLevel.GREEN,
+    )
+    locked_excess = evaluate_bridge_reconciliation(
+        [bridge(0, 1_000_001), bridge(0, 1_000_001)],
+        RiskLevel.GREEN,
+    )
+
+    assert overissued.level is RiskLevel.RED
+    assert locked_excess.level is RiskLevel.YELLOW
+
+
+def test_direction_change_restarts_confirmation() -> None:
+    result = evaluate_bridge_reconciliation(
+        [
+            bridge(102_000_000, 100_000_000),
+            bridge(100_000_000, 102_000_000),
+        ],
+        RiskLevel.GREEN,
+    )
+
+    assert result.level is RiskLevel.GREEN
