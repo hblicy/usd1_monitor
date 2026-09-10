@@ -39,6 +39,29 @@ http:
     assert config.wechat_webhook is None
 
 
+def test_dashboard_config_defaults_to_unprivileged_port(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text("database_path: monitor.db\n", encoding="utf-8")
+
+    config = load_config(path, environ={})
+
+    assert config.dashboard.port == 8080
+
+
+@pytest.mark.parametrize("port", [1023, 65536])
+def test_dashboard_config_rejects_port_outside_safe_range(
+    tmp_path: Path, port: int
+) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        f"database_path: monitor.db\ndashboard:\n  port: {port}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError):
+        load_config(path, environ={})
+
+
 def test_load_config_rejects_non_positive_rpc_throughput(tmp_path: Path) -> None:
     path = tmp_path / "config.yaml"
     path.write_text(

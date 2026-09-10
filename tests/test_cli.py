@@ -56,6 +56,28 @@ async def test_invalid_configuration_exits_two(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_dashboard_command_does_not_open_writable_storage(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    database_path = tmp_path / "missing.db"
+    write_config(config_path, database_path)
+    captured: list[AppConfig] = []
+
+    async def dashboard_runner(config: AppConfig) -> None:
+        captured.append(config)
+
+    result = await async_main(
+        ["--config", str(config_path), "dashboard"],
+        dashboard_runner=dashboard_runner,
+    )
+
+    assert result == 0
+    assert captured[0].database_path == database_path
+    assert database_path.exists() is False
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(("success", "exit_code"), [(True, 0), (False, 1)])
 async def test_check_exit_code_and_no_delivery(
     tmp_path: Path, success: bool, exit_code: int
