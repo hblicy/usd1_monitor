@@ -223,6 +223,165 @@ async def test_prune_observations_keeps_risk_history(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_prune_observations_keeps_custody_flow_markers(storage) -> None:
+    old_time = datetime(2025, 1, 1, tzinfo=UTC)
+    for metric in ("custody.flow_start_block", "custody.flow_coverage_start"):
+        await storage.insert_observation(
+            Observation(
+                metric,
+                "custody",
+                "ethereum",
+                100,
+                "block",
+                old_time,
+                old_time,
+            )
+        )
+
+    assert await storage.prune_observations(
+        datetime(2026, 7, 1, tzinfo=UTC)
+    ) == 0
+    assert await storage.latest_observation(
+        "custody.flow_start_block", "ethereum"
+    ) is not None
+    assert await storage.latest_observation(
+        "custody.flow_coverage_start", "ethereum"
+    ) is not None
+
+
+@pytest.mark.asyncio
+async def test_nearest_fact_observation_accepts_snapshot_after_boundary(storage) -> None:
+    boundary = datetime(2026, 9, 11, 4, tzinfo=UTC)
+    after = boundary + timedelta(minutes=10)
+    await storage.insert_observation(
+        Observation(
+            "custody.address_balance",
+            "solana_rpc",
+            "solana:owner",
+            7,
+            "USD1",
+            after,
+            after,
+        )
+    )
+
+    result = await storage.nearest_fact_observation(
+        "custody.address_balance",
+        "solana:owner",
+        datetime.fromisoformat("2026-09-11T12:00:00+08:00"),
+        max_distance_seconds=1200,
+    )
+
+    assert result is not None and result.observed_at == after
+
+
+@pytest.mark.asyncio
+async def test_nearest_fact_observation_tie_prefers_later_then_latest_id(storage) -> None:
+    boundary = datetime(2026, 9, 11, 4, tzinfo=UTC)
+    before = boundary - timedelta(minutes=5)
+    after = boundary + timedelta(minutes=5)
+    for value, observed_at in ((1, before), (2, after), (3, after)):
+        await storage.insert_observation(
+            Observation(
+                "custody.address_balance",
+                "solana_rpc",
+                "solana:owner",
+                value,
+                "USD1",
+                observed_at,
+                observed_at,
+            )
+        )
+
+    result = await storage.nearest_fact_observation(
+        "custody.address_balance",
+        "solana:owner",
+        boundary,
+        max_distance_seconds=1200,
+    )
+
+    assert result is not None and result.value == 3
+
+
+@pytest.mark.asyncio
+async def test_nearest_fact_observation_rejects_non_fact_and_both_window_sides(
+    storage,
+) -> None:
+    boundary = datetime(2026, 9, 11, 4, tzinfo=UTC)
+    for value, observed_at, quality in (
+        (1, boundary - timedelta(seconds=1201), "FACT"),
+        (2, boundary + timedelta(seconds=1201), "FACT"),
+        (3, boundary, "ESTIMATED"),
+    ):
+        await storage.insert_observation(
+            Observation(
+                "custody.address_balance",
+                "solana_rpc",
+                "solana:owner",
+                value,
+                "USD1",
+                observed_at,
+                observed_at,
+                quality=quality,
+            )
+        )
+
+    assert await storage.nearest_fact_observation(
+        "custody.address_balance",
+        "solana:owner",
+        boundary,
+        max_distance_seconds=1200,
+    ) is None
+
+
+@pytest.mark.asyncio
+async def test_nearest_fact_observation_requires_aware_target(storage) -> None:
+    with pytest.raises(ValueError, match="timezone-aware"):
+        await storage.nearest_fact_observation(
+            "custody.address_balance",
+            "solana:owner",
+            datetime(2026, 9, 11, 4),
+            max_distance_seconds=1200,
+        )
+
+
+@pytest.mark.asyncio
+async def test_nearest_fact_observation_skips_candidate_and_prior_verification(
+    storage,
+) -> None:
+    boundary = datetime(2026, 9, 11, 4, tzinfo=UTC)
+    rows = (
+        (1, boundary - timedelta(minutes=10), "trusted", "2026-09-11"),
+        (2, boundary - timedelta(minutes=5), "trusted", "2026-08-01"),
+        (3, boundary - timedelta(minutes=1), "candidate", "2026-09-11"),
+    )
+    for value, observed_at, status, verified_on in rows:
+        await storage.insert_observation(
+            Observation(
+                "custody.address_balance",
+                "solana_rpc",
+                "solana:owner",
+                value,
+                "USD1",
+                observed_at,
+                observed_at,
+                metadata={"status": status, "verified_on": verified_on},
+            )
+        )
+
+    result = await storage.nearest_fact_observation(
+        "custody.address_balance",
+        "solana:owner",
+        boundary,
+        max_distance_seconds=1200,
+        before_observed_at=datetime(2026, 9, 11, 5, tzinfo=UTC),
+        metadata_equals={"status": "trusted", "verified_on": "2026-09-11"},
+    )
+
+    assert result is not None and result.value == 1
+
+
+@pytest.mark.asyncio
 async def test_prune_keeps_irreversible_evm_event_state(storage) -> None:
     old_time = datetime(2025, 1, 1, tzinfo=UTC)
     rule_id = "evm.event.ethereum.snapshot:100:implementation"

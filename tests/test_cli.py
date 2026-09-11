@@ -40,6 +40,40 @@ def test_builder_wires_all_multichain_supply_sources(
     assert resource is not None
 
 
+def test_builder_reuses_evm_and_solana_rpc_clients_for_custody(
+    storage,
+    tmp_path: Path,
+) -> None:
+    config = AppConfig.model_validate(
+        {
+            "database_path": tmp_path / "monitor.db",
+            "custody": {
+                "addresses": [
+                    {
+                        "chain": "ethereum",
+                        "address": "0x" + "11" * 20,
+                        "entity": "binance_cex",
+                        "label": "Binance",
+                        "role": "hot_wallet",
+                    }
+                ]
+            },
+        }
+    )
+
+    monitor, resource = build_market_monitor(config, storage)
+
+    assert monitor._custody is not None
+    ethereum_rpc = monitor._evm_chains[0]._scanner._rpc
+    assert monitor._custody._collector._evm_rpcs["ethereum"] is ethereum_rpc
+    supply_sources = monitor._reserve_supply._supply._multichain._sources
+    solana_source = next(
+        item for item in supply_sources if "native_solana" in item.component_ids
+    )
+    assert monitor._custody._collector._solana_rpc is solana_source._rpc
+    assert resource is not None
+
+
 def write_config(path: Path, database_path: Path) -> None:
     path.write_text(
         f"database_path: '{database_path.as_posix()}'\n",

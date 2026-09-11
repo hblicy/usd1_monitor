@@ -15,7 +15,6 @@ def test_status_names_every_non_monitored_capability() -> None:
         "private_exchange_account",
         "active_conversion_probe",
         "tron_solana_aptos_tempo_bridges",
-        "binance_wallet_concentration",
         "social_media_sentiment",
         "defi_liquidations",
     }

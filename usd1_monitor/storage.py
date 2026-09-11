@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import json
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -794,7 +795,14 @@ class Storage:
     @serialized_write
     async def prune_observations(self, cutoff: datetime) -> int:
         cursor = await self.connection.execute(
-            "DELETE FROM observations WHERE observed_at < ?",
+            """
+            DELETE FROM observations
+            WHERE observed_at < ?
+              AND metric NOT IN (
+                  'custody.flow_start_block',
+                  'custody.flow_coverage_start'
+              )
+            """,
             (cutoff.isoformat(),),
         )
         await self.connection.commit()
@@ -1350,6 +1358,84 @@ class Storage:
             LIMIT 1
             """,
             (metric, scope),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        if row is None:
+            return None
+        return Observation(
+            metric=row["metric"],
+            source=row["source"],
+            scope=row["scope"],
+            value=row["value"],
+            unit=row["unit"],
+            observed_at=datetime.fromisoformat(row["observed_at"]),
+            collected_at=datetime.fromisoformat(row["collected_at"]),
+            quality=row["quality"],
+            metadata=json.loads(row["metadata_json"]),
+        )
+
+    async def nearest_fact_observation(
+        self,
+        metric: str,
+        scope: str,
+        observed_at: datetime,
+        *,
+        max_distance_seconds: int,
+        before_observed_at: datetime | None = None,
+        metadata_equals: Mapping[str, object] | None = None,
+    ) -> Observation | None:
+        if observed_at.tzinfo is None or observed_at.utcoffset() is None:
+            raise ValueError("observed_at must be timezone-aware")
+        if (
+            isinstance(max_distance_seconds, bool)
+            or not isinstance(max_distance_seconds, int)
+            or max_distance_seconds < 0
+        ):
+            raise ValueError("max_distance_seconds must be a non-negative integer")
+        target = observed_at.astimezone(UTC)
+        lower = target - timedelta(seconds=max_distance_seconds)
+        upper = target + timedelta(seconds=max_distance_seconds)
+        conditions = [
+            "metric = ?",
+            "scope = ?",
+            "quality = 'FACT'",
+            "julianday(observed_at) BETWEEN julianday(?) AND julianday(?)",
+        ]
+        parameters: list[object] = [
+            metric,
+            scope,
+            lower.isoformat(),
+            upper.isoformat(),
+        ]
+        if before_observed_at is not None:
+            if (
+                before_observed_at.tzinfo is None
+                or before_observed_at.utcoffset() is None
+            ):
+                raise ValueError("before_observed_at must be timezone-aware")
+            conditions.append("julianday(observed_at) < julianday(?)")
+            parameters.append(before_observed_at.astimezone(UTC).isoformat())
+        for key, value in sorted((metadata_equals or {}).items()):
+            conditions.append("json_extract(metadata_json, ?) = ?")
+            parameters.extend((f"$.{key}", value))
+        parameters.append(target.isoformat())
+        cursor = await self.connection.execute(
+            f"""
+            SELECT id, metric, source, scope, value, unit, observed_at,
+                   collected_at, quality, metadata_json
+            FROM observations
+            WHERE {' AND '.join(conditions)}
+            ORDER BY
+                ROUND(
+                    ABS((julianday(observed_at) - julianday(?)) * 86400.0),
+                    3
+                ) ASC,
+                unixepoch(observed_at) DESC,
+                id DESC
+            LIMIT 1
+            """,
+            parameters,
         )
         row = await cursor.fetchone()
         await cursor.close()

@@ -6,9 +6,19 @@ import signal
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from math import isfinite
 from typing import Protocol
 
-from usd1_monitor.config import MarketConfig
+from usd1_monitor.config import (
+    CustodyConfig,
+    MarketConfig,
+    current_date_for_timezone,
+)
+from usd1_monitor.collectors.custody import (
+    CustodyBalanceCollector,
+    CustodyCollection,
+    enrich_transfer_timestamps,
+)
 from usd1_monitor.collectors.evm import (
     EvmScanner,
     EvmSnapshot,
@@ -37,6 +47,14 @@ from usd1_monitor.engine.evm_rules import (
     evaluate_evm_fact,
 )
 from usd1_monitor.engine.health import evaluate_health_with_recovery
+from usd1_monitor.engine.custody_rules import (
+    RuleDecision,
+    Transfer,
+    evaluate_address_outflow,
+    evaluate_concentration,
+    evaluate_entity_flow,
+    summarize_transfers,
+)
 from usd1_monitor.engine.information_rules import (
     classify_official_text,
     next_attestation_due_at,
@@ -70,12 +88,16 @@ from usd1_monitor.storage import Storage
 logger = logging.getLogger(__name__)
 _NOT_COLLECTED = object()
 _NEW_INFORMATION_ALERT_MAX_AGE = timedelta(hours=24)
+_CUSTODY_RULE_IDS = (
+    "custody.binance_concentration",
+    "custody.binance_flow_24h",
+    "custody.address_outflow_1h",
+)
 
 NOT_MONITORED = (
     "private_exchange_account",
     "active_conversion_probe",
     "tron_solana_aptos_tempo_bridges",
-    "binance_wallet_concentration",
     "social_media_sentiment",
     "defi_liquidations",
 )
@@ -1031,6 +1053,691 @@ async def _deliver_pending(
             )
 
 
+class CustodyConcentrationMonitor:
+    def __init__(
+        self,
+        collector: CustodyBalanceCollector,
+        storage: Storage,
+        config: CustodyConfig,
+        *,
+        confirmation_depths: dict[str, int] | None = None,
+        evm_rpcs: dict[str, object] | None = None,
+        timezone_name: str = "Asia/Shanghai",
+    ) -> None:
+        self._collector = collector
+        self._storage = storage
+        self._config = config
+        self._confirmation_depths = confirmation_depths or {
+            "ethereum": 0,
+            "bsc": 0,
+        }
+        self._evm_rpcs = evm_rpcs or {}
+        self._timezone_name = timezone_name
+
+    @property
+    def tick_interval_seconds(self) -> int:
+        return self._config.interval_seconds
+
+    @staticmethod
+    def _address_key(chain: str, address: str) -> str:
+        return address if chain == "solana" else address.casefold()
+
+    async def check_once(
+        self,
+        *,
+        deliver: bool = True,
+        now: datetime | None = None,
+    ) -> CheckResult:
+        del deliver
+        checked_at = now or datetime.now(UTC)
+        if checked_at.tzinfo is None or checked_at.utcoffset() is None:
+            raise ValueError("now must be timezone-aware")
+        checked_at = checked_at.astimezone(UTC)
+        trusted = self._config.trusted_addresses(
+            current_date_for_timezone(self._timezone_name, checked_at)
+        )
+        trusted_keys = {
+            (item.chain, self._address_key(item.chain, item.address))
+            for item in trusted
+        }
+        binance_trusted_keys = {
+            (item.chain, self._address_key(item.chain, item.address))
+            for item in trusted
+            if item.entity in {"binance_cex", "binance_peg_reserve"}
+        }
+        collections: dict[str, CustodyCollection] = {}
+        errors: list[str] = []
+        for chain in ("ethereum", "bsc", "solana"):
+            configured = [
+                item for item in self._config.addresses if item.chain == chain
+            ]
+            if not configured:
+                continue
+            effective = [item for item in trusted if item.chain == chain]
+            try:
+                if chain == "solana":
+                    collection = await self._collector.collect_solana(
+                        configured,
+                        checked_at,
+                        trusted_addresses=effective,
+                    )
+                else:
+                    collection = await self._collector.collect_evm(
+                        chain,
+                        configured,
+                        self._confirmation_depths.get(chain, 0),
+                        checked_at,
+                        trusted_addresses=effective,
+                    )
+                collections[chain] = collection
+                for failure in collection.errors:
+                    failure_key = (
+                        failure.chain,
+                        self._address_key(failure.chain, failure.address),
+                    )
+                    detail = (
+                        f"custody: {failure.chain} {failure.label}: "
+                        f"{failure.error}"
+                    )
+                    if failure_key in trusted_keys:
+                        errors.append(detail)
+                    else:
+                        logger.warning(
+                            "candidate custody collection failed "
+                            "chain=%s address=%s label=%s error=%s",
+                            failure.chain,
+                            failure.address,
+                            failure.label,
+                            failure.error,
+                        )
+            except Exception as exc:
+                if effective:
+                    logger.exception("custody collection failed chain=%s", chain)
+                    errors.append(f"custody: {chain}: {type(exc).__name__}: {exc}")
+                else:
+                    logger.warning(
+                        "candidate-only custody collection failed chain=%s",
+                        chain,
+                        exc_info=True,
+                    )
+
+        invalid_evm_chains: set[str] = set()
+        for chain in ("ethereum", "bsc"):
+            collection = collections.get(chain)
+            if collection is None or not any(item.chain == chain for item in trusted):
+                continue
+            cursor = await self._storage.get_scan_cursor(chain)
+            if (
+                cursor is not None
+                and isinstance(collection.safe_block, int)
+                and collection.safe_block < cursor
+            ):
+                invalid_evm_chains.add(chain)
+                errors.append(
+                    f"custody: {chain} RPC safe block {collection.safe_block} "
+                    f"is behind persisted scan cursor {cursor}"
+                )
+        observations = [
+            item
+            for collection in collections.values()
+            for item in collection.observations
+            if not (
+                item.scope.split(":", 1)[0] in invalid_evm_chains
+                and item.metadata.get("status") == "trusted"
+            )
+        ]
+        await self._persist_observations(observations)
+        await self._publish_solana_deltas(
+            observations, trusted_keys, checked_at
+        )
+
+        observed_trusted = {
+            (
+                item.scope.split(":", 1)[0],
+                item.scope.split(":", 1)[1],
+            )
+            for item in observations
+            if item.metric == "custody.address_balance"
+            and item.metadata.get("status") == "trusted"
+            and ":" in item.scope
+        }
+        trusted_complete = bool(trusted_keys) and all(
+            collection.trusted_complete for collection in collections.values()
+        ) and not invalid_evm_chains and trusted_keys.issubset(observed_trusted)
+        if not trusted_keys:
+            errors.append("custody: no effective trusted addresses")
+        elif not binance_trusted_keys:
+            errors.append("custody: no effective Binance trusted addresses")
+
+        entity_totals: dict[tuple[str, str], float] = {}
+        binance_total = 0.0
+        source_urls: list[str] = []
+        if trusted_complete:
+            for item in observations:
+                if item.metric != "custody.address_balance":
+                    continue
+                chain, address = item.scope.split(":", 1)
+                if (chain, address) not in trusted_keys:
+                    continue
+                entity = str(item.metadata["entity"])
+                entity_totals[(entity, chain)] = (
+                    entity_totals.get((entity, chain), 0.0) + item.value
+                )
+                if entity in {"binance_cex", "binance_peg_reserve"}:
+                    binance_total += item.value
+                for url in item.metadata.get("evidence_urls", []):
+                    if isinstance(url, str) and url not in source_urls:
+                        source_urls.append(url)
+            entity_rows = [
+                Observation(
+                    "custody.entity_balance",
+                    "custody",
+                    f"{entity}:{chain}",
+                    value,
+                    "USD1",
+                    checked_at,
+                    checked_at,
+                    metadata={"entity": entity, "chain": chain},
+                )
+                for (entity, chain), value in sorted(entity_totals.items())
+            ]
+            await self._persist_observations(entity_rows)
+        elif trusted_keys:
+            errors.append("custody: trusted address set is incomplete")
+
+        supply = await self._storage.latest_observation(
+            "supply.multichain_total", "global"
+        )
+        supply_error = self._validate_supply(supply, checked_at)
+        share: float | None = None
+        concentration_evidence: dict[str, object] | None = None
+        if supply_error is not None:
+            errors.append(f"custody: {supply_error}")
+        elif trusted_complete and binance_trusted_keys and supply is not None:
+            share = binance_total / supply.value
+            aggregate_rows = [
+                Observation(
+                    "custody.binance_verified_balance",
+                    "custody",
+                    "global",
+                    binance_total,
+                    "USD1",
+                    checked_at,
+                    checked_at,
+                    metadata={"max_age_seconds": self._config.interval_seconds * 2},
+                ),
+                Observation(
+                    "custody.binance_share_lower_bound",
+                    "custody",
+                    "global",
+                    share,
+                    "ratio",
+                    checked_at,
+                    checked_at,
+                    metadata={
+                        "verified_balance": binance_total,
+                        "supply": supply.value,
+                        "source_urls": source_urls,
+                        "max_age_seconds": self._config.interval_seconds * 2,
+                    },
+                ),
+            ]
+            await self._persist_observations(aggregate_rows)
+            concentration_evidence = {
+                "share": share,
+                "verified_balance": binance_total,
+                "threshold": {
+                    "yellow": self._config.yellow_share,
+                    "red": self._config.red_share,
+                },
+                "data_time": checked_at.isoformat(),
+                "source_urls": source_urls,
+            }
+
+        flow_collections = {
+            chain: collection
+            for chain, collection in collections.items()
+            if chain not in invalid_evm_chains
+        }
+        flow_errors = await self._process_evm_flows(
+            flow_collections,
+            trusted,
+            checked_at,
+            evaluate_rules=not errors,
+        )
+        errors.extend(flow_errors)
+        if errors:
+            await self._interrupt_rules(
+                _CUSTODY_RULE_IDS,
+                checked_at,
+                "; ".join(dict.fromkeys(errors)),
+            )
+        elif share is not None and concentration_evidence is not None:
+            await self._evaluate_rule(
+                "custody.binance_concentration",
+                lambda previous, clear: evaluate_concentration(
+                    share,
+                    previous,
+                    clear,
+                    yellow=self._config.yellow_share,
+                    red=self._config.red_share,
+                    recovery_checks=self._config.recovery_checks,
+                ),
+                checked_at,
+                concentration_evidence,
+                "custody:concentration",
+            )
+        success = not errors
+        details = ()
+        if share is not None:
+            details = (
+                f"custody trusted_balance={binance_total:g} "
+                f"share_lower_bound={share:g}",
+            )
+        return CheckResult(success, tuple(dict.fromkeys(errors)), details)
+
+    @staticmethod
+    def _validate_supply(
+        supply: Observation | None, checked_at: datetime
+    ) -> str | None:
+        if supply is None:
+            return "complete multichain supply is unavailable"
+        if supply.quality != "FACT":
+            return "complete multichain supply is not FACT"
+        if not isfinite(supply.value) or supply.value <= 0:
+            return "complete multichain supply is invalid"
+        age = (checked_at - supply.observed_at.astimezone(UTC)).total_seconds()
+        if age < 0 or age > 4500:
+            return "complete multichain supply is stale"
+        return None
+
+    async def _persist_observations(
+        self, observations: list[Observation]
+    ) -> None:
+        if not observations:
+            return
+        connection = self._storage.connection
+        async with self._storage.write_lock:
+            await connection.execute("BEGIN IMMEDIATE")
+            try:
+                for item in observations:
+                    await self._storage.insert_observation_uncommitted(item)
+                await connection.commit()
+            except BaseException:
+                await connection.rollback()
+                raise
+
+    async def _publish_solana_deltas(
+        self,
+        observations: list[Observation],
+        trusted_keys: set[tuple[str, str]],
+        now: datetime,
+    ) -> None:
+        rows: list[Observation] = []
+        for current in observations:
+            if not current.scope.startswith("solana:"):
+                continue
+            chain, address = current.scope.split(":", 1)
+            if (chain, address) not in trusted_keys:
+                continue
+            verified_on = current.metadata.get("verified_on")
+            if not isinstance(verified_on, str) or not verified_on:
+                continue
+            for hours in (1, 24):
+                boundary = now - timedelta(hours=hours)
+                prior = await self._storage.nearest_fact_observation(
+                    "custody.address_balance",
+                    current.scope,
+                    boundary,
+                    max_distance_seconds=min(
+                        self._config.interval_seconds * 2, 1800
+                    ),
+                    before_observed_at=current.observed_at,
+                    metadata_equals={
+                        "status": "trusted",
+                        "verified_on": verified_on,
+                    },
+                )
+                metadata: dict[str, object] = {
+                    "counterparty_attribution": False,
+                }
+                value = 0.0
+                quality = "FACT"
+                if prior is None:
+                    metadata["status"] = "accumulating"
+                    metadata["window_hours"] = hours
+                    quality = "UNAVAILABLE"
+                else:
+                    value = current.value - prior.value
+                    metadata["status"] = "complete"
+                    metadata["window_hours"] = hours
+                rows.append(
+                    Observation(
+                        f"custody.solana_balance_delta_{hours}h",
+                        "custody",
+                        current.scope,
+                        value,
+                        "USD1",
+                        now,
+                        now,
+                        quality=quality,
+                        metadata=metadata,
+                    )
+                )
+        await self._persist_observations(rows)
+
+    async def _process_evm_flows(
+        self,
+        collections: dict[str, CustodyCollection],
+        trusted: list[object],
+        now: datetime,
+        *,
+        evaluate_rules: bool,
+    ) -> list[str]:
+        errors: list[str] = []
+        binance_by_chain: dict[str, set[str]] = {}
+        for item in trusted:
+            if item.chain in {"ethereum", "bsc"} and item.entity in {
+                "binance_cex",
+                "binance_peg_reserve",
+            }:
+                binance_by_chain.setdefault(item.chain, set()).add(
+                    item.address.casefold()
+                )
+        if not binance_by_chain:
+            return errors
+
+        all_ready_1h = True
+        all_ready_24h = True
+        entity_net = 0.0
+        address_outflows: dict[str, float] = {}
+        for chain, addresses in binance_by_chain.items():
+            collection = collections.get(chain)
+            if collection is None or not collection.trusted_complete:
+                return [f"custody: {chain} flow balance snapshot is incomplete"]
+            safe_block = collection.safe_block
+            if not isinstance(safe_block, int):
+                return [f"custody: {chain} flow safe block is unavailable"]
+            marker = await self._storage.latest_observation(
+                "custody.flow_start_block", chain
+            )
+            if marker is None:
+                marker = Observation(
+                    "custody.flow_start_block",
+                    "custody",
+                    chain,
+                    float(safe_block),
+                    "block",
+                    now,
+                    now,
+                )
+                coverage = Observation(
+                    "custody.flow_coverage_start",
+                    "custody",
+                    chain,
+                    float(safe_block),
+                    "block",
+                    now,
+                    now,
+                )
+                await self._persist_observations([marker, coverage])
+            coverage = await self._storage.latest_observation(
+                "custody.flow_coverage_start", chain
+            )
+            if coverage is None:
+                coverage = marker
+            rpc = self._evm_rpcs.get(chain)
+            if rpc is not None:
+                try:
+                    await enrich_transfer_timestamps(
+                        chain,
+                        rpc,
+                        self._storage,
+                        addresses,
+                        min_block=int(marker.value),
+                    )
+                except Exception as exc:
+                    errors.append(
+                        f"custody: {chain} flow timestamps: "
+                        f"{type(exc).__name__}: {exc}"
+                    )
+                    all_ready_1h = all_ready_24h = False
+                    continue
+            cursor = await self._storage.get_scan_cursor(chain)
+            if cursor is None or cursor < safe_block:
+                all_ready_1h = all_ready_24h = False
+                continue
+            coverage_age = (now - coverage.observed_at.astimezone(UTC)).total_seconds()
+            all_ready_1h = all_ready_1h and coverage_age >= 3600
+            all_ready_24h = all_ready_24h and coverage_age >= 86400
+            try:
+                events = await self._storage.custody_transfers_since(
+                    chain, now - timedelta(hours=24), addresses
+                )
+                transfers = [
+                    self._transfer_from_event(event)
+                    for event in events
+                    if event.block_number >= int(marker.value)
+                ]
+                summary = summarize_transfers(
+                    transfers, frozenset(addresses), now
+                )
+            except Exception as exc:
+                errors.append(
+                    f"custody: {chain} flow data: {type(exc).__name__}: {exc}"
+                )
+                all_ready_1h = all_ready_24h = False
+                continue
+            entity_net += summary.entity_net_24h
+            for address, value in summary.address_outflow_1h.items():
+                address_outflows[f"{chain}:{address}"] = value
+
+        await self._publish_flow_results(
+            entity_net,
+            address_outflows,
+            now,
+            ready_1h=all_ready_1h,
+            ready_24h=all_ready_24h,
+            evaluate_rules=evaluate_rules and not errors,
+        )
+        return errors
+
+    @staticmethod
+    def _transfer_from_event(event: ChainEvent) -> Transfer:
+        raw_time = event.payload.get("block_time")
+        if not isinstance(raw_time, str):
+            raise ValueError("Transfer block_time is unavailable")
+        return Transfer(
+            str(event.payload.get("from_address", "")),
+            str(event.payload.get("to_address", "")),
+            float(event.payload.get("amount")),
+            datetime.fromisoformat(raw_time),
+        )
+
+    async def _publish_flow_results(
+        self,
+        entity_net: float,
+        address_outflows: dict[str, float],
+        now: datetime,
+        *,
+        ready_1h: bool,
+        ready_24h: bool,
+        evaluate_rules: bool,
+    ) -> None:
+        rows: list[Observation] = []
+        flow_metadata = {
+            "status": "complete" if ready_24h else "accumulating",
+            "window_hours": 24,
+        }
+        rows.append(
+            Observation(
+                "custody.binance_net_change_24h",
+                "custody",
+                "global",
+                entity_net if ready_24h else 0.0,
+                "USD1",
+                now,
+                now,
+                quality="FACT" if ready_24h else "UNAVAILABLE",
+                metadata=flow_metadata,
+            )
+        )
+        for scope, value in sorted(address_outflows.items()):
+            rows.append(
+                Observation(
+                    "custody.address_external_outflow_1h",
+                    "custody",
+                    scope,
+                    value if ready_1h else 0.0,
+                    "USD1",
+                    now,
+                    now,
+                    quality="FACT" if ready_1h else "UNAVAILABLE",
+                    metadata={
+                        "status": "complete" if ready_1h else "accumulating",
+                        "window_hours": 1,
+                    },
+                )
+            )
+        await self._persist_observations(rows)
+        interrupted: list[str] = []
+        if not ready_24h:
+            interrupted.append("custody.binance_flow_24h")
+        if not ready_1h:
+            interrupted.append("custody.address_outflow_1h")
+        if interrupted:
+            await self._interrupt_rules(
+                tuple(interrupted), now, "custody flow window unavailable"
+            )
+        if ready_24h and evaluate_rules:
+            await self._evaluate_rule(
+                "custody.binance_flow_24h",
+                lambda previous, clear: evaluate_entity_flow(
+                    entity_net,
+                    previous,
+                    clear,
+                    threshold=self._config.entity_flow_24h,
+                    recovery_checks=self._config.recovery_checks,
+                ),
+                now,
+                {
+                    "value": entity_net,
+                    "threshold": self._config.entity_flow_24h,
+                    "data_time": now.isoformat(),
+                },
+                "custody:flow:24h",
+            )
+        if ready_1h and evaluate_rules:
+            await self._evaluate_rule(
+                "custody.address_outflow_1h",
+                lambda previous, clear: evaluate_address_outflow(
+                    address_outflows,
+                    previous,
+                    clear,
+                    threshold=self._config.address_outflow_1h,
+                    recovery_checks=self._config.recovery_checks,
+                ),
+                now,
+                {
+                    "values": address_outflows,
+                    "threshold": self._config.address_outflow_1h,
+                    "data_time": now.isoformat(),
+                },
+                "custody:flow:1h",
+            )
+
+    async def _interrupt_rules(
+        self,
+        rule_ids: tuple[str, ...],
+        now: datetime,
+        reason: str,
+    ) -> None:
+        await self._persist_observations(
+            [
+                Observation(
+                    "custody.rule_interruption",
+                    "custody",
+                    rule_id,
+                    1.0,
+                    "bool",
+                    now,
+                    now,
+                    quality="UNAVAILABLE",
+                    metadata={"reason": reason},
+                )
+                for rule_id in rule_ids
+            ]
+        )
+
+    async def record_interruption(self, now: datetime, reason: str) -> None:
+        if now.tzinfo is None or now.utcoffset() is None:
+            raise ValueError("now must be timezone-aware")
+        await self._interrupt_rules(
+            _CUSTODY_RULE_IDS,
+            now.astimezone(UTC),
+            reason,
+        )
+
+    async def _evaluate_rule(
+        self,
+        rule_id: str,
+        evaluator: Callable[[RiskLevel, int], RuleDecision],
+        now: datetime,
+        evidence: dict[str, object],
+        cause_id: str,
+    ) -> None:
+        state = await self._storage.get_risk_state(rule_id)
+        previous = state.level if state is not None else RiskLevel.GREEN
+        prior_evidence = await self._storage.latest_observation(
+            "custody.rule_state", rule_id
+        )
+        interruption = await self._storage.latest_observation(
+            "custody.rule_interruption", rule_id
+        )
+        clear_checks = 0
+        if (
+            prior_evidence is not None
+            and prior_evidence.metadata.get("level") == previous.name
+            and (
+                interruption is None
+                or interruption.observed_at < prior_evidence.observed_at
+            )
+        ):
+            raw_clear = prior_evidence.metadata.get("clear_checks", 0)
+            if isinstance(raw_clear, int) and raw_clear >= 0:
+                clear_checks = raw_clear
+        decision = evaluator(previous, clear_checks)
+        level = decision.level
+        full_evidence = dict(evidence)
+        full_evidence["clear_checks"] = decision.clear_checks
+        rule_row = Observation(
+            "custody.rule_state",
+            "custody",
+            rule_id,
+            float(level),
+            "risk_level",
+            now,
+            now,
+            metadata={
+                "level": level.name,
+                "clear_checks": decision.clear_checks,
+                "evidence": full_evidence,
+            },
+        )
+        connection = self._storage.connection
+        async with self._storage.write_lock:
+            await connection.execute("BEGIN IMMEDIATE")
+            try:
+                await self._storage.insert_observation_uncommitted(rule_row)
+                await StateEngine(self._storage).apply_uncommitted(
+                    [RuleEvaluation(rule_id, level, full_evidence, cause_id)], now
+                )
+                await connection.commit()
+            except BaseException:
+                await connection.rollback()
+                raise
+
+
 class Usd1Monitor:
     def __init__(
         self,
@@ -1042,6 +1749,7 @@ class Usd1Monitor:
         interval_seconds: int = 60,
         reserve_supply: "ReserveSupplyMonitor | None" = None,
         information: "InformationMonitor | None" = None,
+        custody: "CustodyConcentrationMonitor | None" = None,
         retention_days: int = 180,
         check_timeout_seconds: float = 45.0,
     ) -> None:
@@ -1055,6 +1763,7 @@ class Usd1Monitor:
         self._startup_sent = False
         self._reserve_supply = reserve_supply
         self._information = information
+        self._custody = custody
         self._retention_days = retention_days
         self._check_timeout_seconds = check_timeout_seconds
         self._last_prune: datetime | None = None
@@ -1093,6 +1802,13 @@ class Usd1Monitor:
                     lambda: self._information.check_once(deliver=False),
                 )
             )
+        if self._custody is not None:
+            checks.append(
+                self._check_component_once(
+                    "custody",
+                    lambda: self._custody.check_once(deliver=False),
+                )
+            )
         results = list(await asyncio.gather(*checks))
         await self._prune_if_due()
         if deliver and self._notifier is not None:
@@ -1125,23 +1841,65 @@ class Usd1Monitor:
                 f"{self._check_timeout_seconds:g}s"
             )
             logger.error("monitor component timed out component=%s", name)
+            checked_at = datetime.now(UTC)
+            errors = (
+                await self._record_custody_interruption(checked_at, error)
+                if name == "custody"
+                else (error,)
+            )
             await _record_health(
                 self._storage,
                 f"scheduler_{name}",
-                datetime.now(UTC),
+                checked_at,
                 success=False,
-                error=error,
+                error="; ".join(errors),
                 critical=True,
             )
-            return CheckResult(False, (error,))
+            return CheckResult(False, errors)
+        except Exception as exc:
+            if name != "custody":
+                raise
+            error = f"custody: {type(exc).__name__}: {exc}"
+            logger.exception("monitor component failed component=custody")
+            checked_at = datetime.now(UTC)
+            errors = await self._record_custody_interruption(checked_at, error)
+            await _record_health(
+                self._storage,
+                "scheduler_custody",
+                checked_at,
+                success=False,
+                error="; ".join(errors),
+                critical=True,
+            )
+            return CheckResult(False, errors)
         await _record_health(
             self._storage,
             f"scheduler_{name}",
             datetime.now(UTC),
-            success=True,
+            success=result.success if name == "custody" else True,
+            error=("; ".join(result.errors) if not result.success else None),
             critical=True,
         )
         return result
+
+    async def _record_custody_interruption(
+        self, checked_at: datetime, original_error: str
+    ) -> tuple[str, ...]:
+        if self._custody is None:
+            return (original_error,)
+        try:
+            await self._custody.record_interruption(checked_at, original_error)
+        except Exception as exc:
+            logger.exception(
+                "custody interruption recording failed original_error=%s",
+                original_error,
+            )
+            return (
+                original_error,
+                "custody interruption recording failed: "
+                f"{type(exc).__name__}: {exc}",
+            )
+        return (original_error,)
 
     async def _prune_if_due(self) -> None:
         async with self._maintenance_lock:
@@ -1236,6 +1994,14 @@ class Usd1Monitor:
                     self._information.tick_interval_seconds,
                 )
             )
+        if self._custody is not None:
+            checks.append(
+                (
+                    "custody",
+                    lambda: self._custody.check_once(deliver=False),
+                    self._custody.tick_interval_seconds,
+                )
+            )
         return checks
 
     async def _run_component(
@@ -1298,6 +2064,8 @@ class Usd1Monitor:
             monitored.append("完整多链供应量与桥接核对")
         if self._information is not None:
             monitored.append("官方公告")
+        if self._custody is not None:
+            monitored.append("Binance 已核验地址集中度与资金变化")
         try:
             await self._notifier.send_text(
                 format_startup_message(monitored, NOT_MONITORED)

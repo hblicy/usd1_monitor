@@ -21,6 +21,7 @@ from usd1_monitor.collectors.announcements import (
     parse_wlfi_items,
 )
 from usd1_monitor.collectors.market import BinanceMarketCollector
+from usd1_monitor.collectors.custody import CustodyBalanceCollector
 from usd1_monitor.collectors.reserves import PorCollector
 from usd1_monitor.collectors.supply import (
     DefiLlamaSupplyCollector,
@@ -41,6 +42,7 @@ from usd1_monitor.rpc import JsonRpcClient
 from usd1_monitor.scheduler import (
     CombinedSupplySource,
     ConfirmedPorSource,
+    CustodyConcentrationMonitor,
     EvmChainMonitor,
     InformationMonitor,
     MarketMonitor,
@@ -167,6 +169,7 @@ def build_market_monitor(
         )
         for chain_name in EVM_CHAIN_IDS
     ]
+    solana_rpc = JsonRpcClient(multichain_config.solana_rpc_urls, http)
     multichain = MultichainSupplySource(
         [
             *evm_supply_collectors,
@@ -175,7 +178,7 @@ def build_market_monitor(
                 multichain_config.tron_rpc_urls,
             ),
             SolanaSupplyCollector(
-                JsonRpcClient(multichain_config.solana_rpc_urls, http)
+                solana_rpc
             ),
             AptosSupplyCollector(
                 http,
@@ -247,6 +250,31 @@ def build_market_monitor(
             for source in official_sources
         },
     )
+    custody = (
+        CustodyConcentrationMonitor(
+            CustodyBalanceCollector(
+                {
+                    "ethereum": rpc_by_chain["ethereum"],
+                    "bsc": rpc_by_chain["bsc"],
+                },
+                solana_rpc,
+                interval_seconds=config.custody.interval_seconds,
+            ),
+            storage,
+            config.custody,
+            confirmation_depths={
+                "ethereum": config.chains.ethereum.confirmation_depth,
+                "bsc": config.chains.bsc.confirmation_depth,
+            },
+            evm_rpcs={
+                "ethereum": rpc_by_chain["ethereum"],
+                "bsc": rpc_by_chain["bsc"],
+            },
+            timezone_name=config.timezone,
+        )
+        if config.custody.addresses
+        else None
+    )
     return (
         Usd1Monitor(
             market,
@@ -256,6 +284,7 @@ def build_market_monitor(
             interval_seconds=config.market.interval_seconds,
             reserve_supply=reserve_supply,
             information=information,
+            custody=custody,
             retention_days=config.retention_days,
         ),
         http,
