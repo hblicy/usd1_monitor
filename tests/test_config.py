@@ -1,4 +1,4 @@
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -10,6 +10,7 @@ from usd1_monitor.config import (
     CustodyAddressConfig,
     CustodyConfig,
     RedemptionConfig,
+    is_verification_current,
     load_config,
 )
 
@@ -108,6 +109,17 @@ def test_custody_rejects_invalid_address_formats() -> None:
                 "role": "hot_wallet",
             }
         )
+
+    with pytest.raises(ValueError, match="32 bytes"):
+        CustodyAddressConfig.model_validate(
+            {
+                "chain": "solana",
+                "address": "z" * 44,
+                "entity": "binance_cex",
+                "label": "too long after base58 decoding",
+                "role": "hot_wallet",
+            }
+        )
     with pytest.raises(ValueError, match="base58"):
         CustodyAddressConfig.model_validate(
             {
@@ -118,6 +130,34 @@ def test_custody_rejects_invalid_address_formats() -> None:
                 "role": "hot_wallet",
             }
         )
+
+
+def test_trusted_custody_address_rejects_future_utc_verification_date() -> None:
+    tomorrow = (datetime.now(timezone.utc).date() + timedelta(days=1)).isoformat()
+
+    with pytest.raises(ValueError, match="must not be in the future"):
+        CustodyAddressConfig.model_validate(
+            {
+                "chain": "ethereum",
+                "address": "0xf977814e90da44bfa03b6295a0616a897441acec",
+                "entity": "binance_cex",
+                "label": "Binance 8",
+                "role": "hot_wallet",
+                "status": "trusted",
+                "verified_on": tomorrow,
+                "evidence": [_evidence("https://www.binance.com/en/square/post/97671")],
+            }
+        )
+
+
+def test_verification_currentness_can_be_rechecked_as_time_advances() -> None:
+    verified_on = date(2026, 1, 1)
+
+    assert is_verification_current(verified_on, 90, as_of=date(2026, 3, 31))
+    assert not is_verification_current(verified_on, 90, as_of=date(2026, 4, 2))
+    assert not is_verification_current(
+        verified_on, 90, as_of=date(2025, 12, 31)
+    )
 
 
 def test_custody_rejects_duplicate_addresses_and_evidence_hosts() -> None:
@@ -196,6 +236,31 @@ def test_trusted_custody_address_accepts_two_independent_labels() -> None:
     )
 
     assert item.status == "trusted"
+
+
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [
+        ("https://a.labels.example/source", "https://b.labels.example/source"),
+        ("https://a.provider.co.uk/source", "https://b.provider.co.uk/source"),
+    ],
+)
+def test_label_evidence_rejects_subdomains_of_same_registered_source(
+    first: str, second: str
+) -> None:
+    with pytest.raises(ValueError, match="evidence hosts must be independent"):
+        CustodyAddressConfig.model_validate(
+            {
+                "chain": "ethereum",
+                "address": "0xf977814e90da44bfa03b6295a0616a897441acec",
+                "entity": "binance_cex",
+                "label": "Binance 8",
+                "role": "hot_wallet",
+                "status": "trusted",
+                "verified_on": date.today().isoformat(),
+                "evidence": [_evidence(first, "label"), _evidence(second, "label")],
+            }
+        )
 
 
 def test_custody_uses_custom_verification_max_age() -> None:

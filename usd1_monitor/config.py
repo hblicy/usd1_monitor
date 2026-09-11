@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import re
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Literal, Mapping
 from urllib.parse import urlsplit
@@ -29,6 +29,58 @@ class ConfigError(ValueError):
 
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+
+_BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+_COMMON_MULTI_LABEL_SUFFIXES = {
+    "ac.uk",
+    "co.ar",
+    "co.br",
+    "co.cn",
+    "co.in",
+    "co.jp",
+    "co.kr",
+    "co.nz",
+    "co.uk",
+    "co.za",
+    "com.au",
+    "com.br",
+    "com.cn",
+    "com.hk",
+    "com.mx",
+    "com.my",
+    "com.ph",
+    "com.sg",
+    "com.tr",
+    "com.tw",
+    "gov.uk",
+    "net.au",
+    "net.uk",
+    "ne.jp",
+    "org.au",
+    "org.uk",
+}
+
+
+def is_verification_current(
+    verified_on: date,
+    verification_max_age_days: int,
+    as_of: date | None = None,
+) -> bool:
+    """Return whether evidence is current when evaluated at an as-of UTC date."""
+    current_date = as_of or datetime.now(timezone.utc).date()
+    if verified_on > current_date:
+        return False
+    return (current_date - verified_on).days <= verification_max_age_days
+
+
+def _decode_base58(value: str) -> bytes:
+    number = 0
+    for character in value:
+        number = number * 58 + _BASE58_ALPHABET.index(character)
+    leading_zero_count = len(value) - len(value.lstrip("1"))
+    payload = number.to_bytes((number.bit_length() + 7) // 8, "big")
+    return b"\x00" * leading_zero_count + payload
 
 
 class AddressEvidenceConfig(StrictModel):
@@ -82,10 +134,19 @@ class CustodyAddressConfig(StrictModel):
         if self.chain in {"ethereum", "bsc"}:
             if re.fullmatch(r"0x[0-9a-fA-F]{40}", self.address) is None:
                 raise ValueError("EVM custody address must be a 20-byte hex address")
-        elif re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{32,44}", self.address) is None:
-            raise ValueError("Solana custody address must be base58")
+        else:
+            if re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{32,44}", self.address) is None:
+                raise ValueError("Solana custody address must be base58")
+            try:
+                decoded = _decode_base58(self.address)
+            except ValueError as exc:
+                raise ValueError("Solana custody address must be base58") from exc
+            if len(decoded) != 32:
+                raise ValueError(
+                    "Solana custody address must decode to exactly 32 bytes"
+                )
 
-        hosts = [_normalize_evidence_host(item.url) for item in self.evidence]
+        hosts = [_normalize_evidence_source(item.url) for item in self.evidence]
         if len(hosts) != len(set(hosts)):
             raise ValueError("address evidence hosts must be independent")
 
@@ -103,6 +164,12 @@ class CustodyAddressConfig(StrictModel):
         ]
         if any(host not in owner_hosts for host in official_hosts):
             raise ValueError("official evidence host does not match entity")
+
+        if (
+            self.verified_on is not None
+            and self.verified_on > datetime.now(timezone.utc).date()
+        ):
+            raise ValueError("custody address verified_on must not be in the future")
 
         if self.status != "trusted":
             return self
@@ -146,8 +213,10 @@ class CustodyConfig(StrictModel):
             if (
                 item.status == "trusted"
                 and item.verified_on is not None
-                and (date.today() - item.verified_on).days
-                > self.verification_max_age_days
+                and not is_verification_current(
+                    item.verified_on,
+                    self.verification_max_age_days,
+                )
             ):
                 raise ValueError(
                     "address verification is older than "
@@ -211,6 +280,17 @@ def _normalize_evidence_host(url: str) -> str:
     if not host:
         return ""
     return host.casefold().removeprefix("www.")
+
+
+def _normalize_evidence_source(url: str) -> str:
+    host = _normalize_evidence_host(url)
+    labels = host.split(".")
+    if len(labels) < 2:
+        return host
+    suffix = ".".join(labels[-2:])
+    if suffix in _COMMON_MULTI_LABEL_SUFFIXES and len(labels) >= 3:
+        return ".".join(labels[-3:])
+    return suffix
 
 
 class HttpConfig(StrictModel):
