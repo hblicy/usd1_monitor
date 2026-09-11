@@ -232,6 +232,29 @@ async def test_aptos_rejects_boolean_supply_v2() -> None:
 
 
 @pytest.mark.asyncio
+async def test_aptos_empty_pool_rows_mean_zero_balance() -> None:
+    http = FakeHttp()
+    url = "https://aptos.example/v1/graphql"
+    body = aptos_response(
+        supply="16211958179163", balance="1"
+    )
+    body["data"]["current_fungible_asset_balances"] = []
+    http.queue_json(url, body, method="POST")
+
+    batch = await AptosSupplyCollector(http, [url]).collect(NOW)
+
+    assert batch.errors == ()
+    assert [item.supply for item in batch.snapshots] == [
+        pytest.approx(16_211_958.179163),
+        0,
+    ]
+    assert (
+        batch.snapshots[1].observation.metadata["component_id"]
+        == "locked_aptos"
+    )
+
+
+@pytest.mark.asyncio
 async def test_aptos_duplicate_metadata_preserves_valid_pool_balance() -> None:
     http = FakeHttp()
     url = "https://aptos.example/v1/graphql"

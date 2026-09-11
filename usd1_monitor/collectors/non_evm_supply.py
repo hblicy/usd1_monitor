@@ -318,26 +318,29 @@ class AptosSupplyCollector:
 
         balances = data.get("current_fungible_asset_balances")
         try:
-            if not isinstance(balances, list) or len(balances) != 1:
+            if not isinstance(balances, list):
                 raise SupplyDataError(
                     "Aptos USD1 pool row must be unique"
                 )
-            row = balances[0]
-            if (
-                not isinstance(row, dict)
-                or row.get("asset_type") != APTOS_METADATA
-                or row.get("owner_address") != APTOS_POOL
-            ):
+            if not balances:
+                raw_balance = 0
+            elif len(balances) != 1:
                 raise SupplyDataError(
-                    "Aptos USD1 pool identity mismatch"
+                    "Aptos USD1 pool row must be unique"
                 )
-            raw_balance = row.get("amount")
-            if (
-                not isinstance(raw_balance, str)
-                or not raw_balance.isdigit()
-            ):
-                raise SupplyDataError(
-                    "Aptos USD1 pool amount is malformed"
+            else:
+                row = balances[0]
+                if (
+                    not isinstance(row, dict)
+                    or row.get("asset_type") != APTOS_METADATA
+                    or row.get("owner_address") != APTOS_POOL
+                ):
+                    raise SupplyDataError(
+                        "Aptos USD1 pool identity mismatch"
+                    )
+                raw_balance = _parse_uint(
+                    row.get("amount"),
+                    "Aptos USD1 pool amount is malformed",
                 )
             snapshots.append(
                 _snapshot(
@@ -345,7 +348,7 @@ class AptosSupplyCollector:
                     "bridge.locked",
                     "aptos_indexer",
                     "aptos",
-                    int(raw_balance),
+                    raw_balance,
                     6,
                     collected_at,
                     APTOS_EXPLORER,
