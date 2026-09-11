@@ -796,6 +796,31 @@ async def test_invalid_transfer_block_time_is_requeued_but_not_queried(
 
 
 @pytest.mark.asyncio
+async def test_transfer_block_time_utc_conversion_overflow_has_context(
+    storage,
+) -> None:
+    await storage.insert_chain_events_and_cursor(
+        "ethereum",
+        [
+            _transfer_event(
+                "ethereum",
+                109,
+                payload_extra={"block_time": "0001-01-01T00:00:00+23:59"},
+            )
+        ],
+        109,
+    )
+
+    with pytest.raises(
+        storage_module.StorageError,
+        match="ethereum.*109.*block_time.*UTC",
+    ):
+        await storage.custody_transfers_since(
+            "ethereum", datetime(2026, 1, 1, tzinfo=UTC), {TRANSFER_FROM}
+        )
+
+
+@pytest.mark.asyncio
 async def test_set_transfer_block_time_rolls_back_mid_update(storage) -> None:
     await storage.insert_chain_events_and_cursor(
         "ethereum",
@@ -823,6 +848,7 @@ async def test_set_transfer_block_time_rolls_back_mid_update(storage) -> None:
         await storage.set_transfer_block_time(
             "ethereum", 110, datetime(2026, 9, 11, tzinfo=UTC)
         )
+    assert storage.connection.in_transaction is False
 
     reader = sqlite3.connect(storage.path)
     try:

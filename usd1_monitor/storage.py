@@ -1228,15 +1228,20 @@ class Storage:
             )
         try:
             parsed = datetime.fromisoformat(raw)
+            if parsed.tzinfo is None or parsed.utcoffset() is None:
+                raise cls._transfer_storage_error(
+                    row, "Transfer block_time must be timezone-aware"
+                )
+            normalized = parsed.astimezone(UTC)
+        except OverflowError as exc:
+            raise cls._transfer_storage_error(
+                row, "Transfer block_time cannot be normalized to UTC"
+            ) from exc
         except ValueError as exc:
             raise cls._transfer_storage_error(
                 row, "Transfer block_time is not a valid ISO datetime"
             ) from exc
-        if parsed.tzinfo is None or parsed.utcoffset() is None:
-            raise cls._transfer_storage_error(
-                row, "Transfer block_time must be timezone-aware"
-            )
-        return parsed.astimezone(UTC)
+        return normalized
 
     @staticmethod
     def _transfer_storage_error(
