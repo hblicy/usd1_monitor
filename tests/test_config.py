@@ -9,11 +9,20 @@ from usd1_monitor.config import (
     ConfigError,
     CustodyAddressConfig,
     CustodyConfig,
+    PorConfig,
     RedemptionConfig,
     current_date_for_timezone,
     is_verification_current,
     load_config,
 )
+
+
+def test_por_coverage_max_age_defaults_to_30_minutes_and_must_be_positive(
+) -> None:
+    assert PorConfig().coverage_max_age_seconds == 1800
+
+    with pytest.raises(ValueError):
+        PorConfig(coverage_max_age_seconds=0)
 
 
 def _evidence(url: str, kind: str = "official") -> dict[str, str]:

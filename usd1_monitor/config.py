@@ -433,6 +433,7 @@ class WatchedAddressConfig(StrictModel):
 class PorConfig(StrictModel):
     address: str = POR_ORACLE_ADDRESS
     interval_seconds: int = Field(default=300, gt=0)
+    coverage_max_age_seconds: int = Field(default=1800, gt=0)
     yellow_staleness_seconds: int = Field(default=3600, gt=0)
     red_staleness_seconds: int = Field(default=7200, gt=0)
     relative_change_threshold: float = Field(default=0.005, gt=0)

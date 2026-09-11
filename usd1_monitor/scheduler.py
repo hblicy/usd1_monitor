@@ -185,6 +185,17 @@ def _observation_source_urls(*items: Observation) -> list[str]:
     return urls
 
 
+def _validated_observation_age(observed_at: datetime, now: datetime) -> float:
+    if observed_at.tzinfo is None or observed_at.utcoffset() is None:
+        raise ValueError("observation timestamp must be timezone-aware")
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError("current timestamp must be timezone-aware")
+    age = (now.astimezone(UTC) - observed_at.astimezone(UTC)).total_seconds()
+    if age < 0:
+        raise ValueError("observation timestamp must not be in the future")
+    return age
+
+
 @dataclass(frozen=True)
 class CheckResult:
     success: bool
@@ -2279,6 +2290,7 @@ class ReserveSupplyMonitor:
                 raise collected
             else:
                 por = collected
+            _validated_observation_age(por.observed_at, checked_at)
             await self._persist_por(por, checked_at)
             await _record_health(
                 self._storage, "por", checked_at, success=True, critical=True
@@ -2669,8 +2681,19 @@ class ReserveSupplyMonitor:
         if (
             reserves is None
             or global_supply is None
-            or (now - reserves.observed_at).total_seconds() > 4500
-            or (now - global_supply.observed_at).total_seconds() > 4500
+            or reserves.quality != "FACT"
+            or global_supply.quality != "FACT"
+        ):
+            return None, []
+        reserve_age = (
+            _validated_observation_age(reserves.observed_at, now)
+        )
+        supply_age = (
+            _validated_observation_age(global_supply.observed_at, now)
+        )
+        if (
+            reserve_age >= self._por_config.coverage_max_age_seconds
+            or supply_age > 4500
         ):
             return None, []
         coverage = estimated_coverage(
@@ -2682,9 +2705,13 @@ class ReserveSupplyMonitor:
             "global",
             coverage.ratio_percent,
             "percent",
-            now,
+            min(reserves.observed_at, global_supply.observed_at),
             now,
             quality=coverage.quality,
+            metadata={
+                "por_observed_at": reserves.observed_at.isoformat(),
+                "supply_observed_at": global_supply.observed_at.isoformat(),
+            },
         )
         await self._storage.insert_observation_uncommitted(observation)
         ratio_rows = await self._storage.latest_observations(
@@ -2732,7 +2759,7 @@ class ReserveSupplyMonitor:
                 "current": observation.value,
                 "threshold": 100,
                 "quality": "ESTIMATED",
-                "data_time": now.isoformat(),
+                "data_time": observation.observed_at.isoformat(),
             }
             source_urls = _observation_source_urls(reserves, global_supply)
             if source_urls:

@@ -7,7 +7,7 @@ from usd1_monitor.collectors.reserves import PorSnapshot
 from usd1_monitor.collectors.supply import SupplySnapshot
 from usd1_monitor.collectors.multichain_supply import REQUIRED_COMPONENT_IDS
 from usd1_monitor.models import Observation, RiskLevel
-from usd1_monitor.config import SupplyConfig
+from usd1_monitor.config import PorConfig, SupplyConfig
 from usd1_monitor.scheduler import (
     CombinedSupplySource,
     ReserveSupplyMonitor,
@@ -584,6 +584,295 @@ async def test_stale_reserves_do_not_emit_estimated_coverage(storage) -> None:
     assert await storage.latest_observations(
         "supply.estimated_collateralization", limit=1
     ) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("age_seconds", "expected_count"), [(1799, 1), (1800, 0)]
+)
+async def test_coverage_is_available_only_before_30_minutes(
+    storage, age_seconds: int, expected_count: int
+) -> None:
+    observed_at = NOW - timedelta(seconds=age_seconds)
+    por = FakePorCollector()
+    por.queue_snapshot(por_snapshot_for(4_200_000_000, observed_at))
+    supply = FakeSupplyCollector()
+    supply.queue_batch(
+        multichain_batch(
+            native_total=4_100_000_000,
+            bridged_total=1_000_000,
+            locked_total=1_000_000,
+            complete=True,
+        )
+    )
+    notifier = FakeNotifier()
+    monitor = ReserveSupplyMonitor(
+        por,
+        supply,
+        storage,
+        notifier,
+        por_config=PorConfig(coverage_max_age_seconds=1800),
+    )
+
+    await monitor.check_once(now=NOW)
+
+    rows = await storage.latest_observations(
+        "supply.estimated_collateralization", limit=2
+    )
+    assert len(rows) == expected_count
+    assert notifier.messages == []
+    reserves = await storage.latest_observation("por.reserves", "ethereum")
+    assert reserves is not None and reserves.value == 4_200_000_000
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "observed_at",
+    [NOW + timedelta(seconds=1), NOW.replace(tzinfo=None)],
+)
+async def test_invalid_por_time_cannot_be_treated_as_fresh(
+    storage, observed_at: datetime
+) -> None:
+    await storage.insert_observation(
+        Observation(
+            "por.reserves",
+            "por_oracle",
+            "ethereum",
+            100,
+            "USD",
+            observed_at,
+            observed_at,
+        )
+    )
+    await storage.insert_observation(
+        Observation(
+            "supply.multichain_total",
+            "onchain_multichain",
+            "global",
+            100,
+            "USD1",
+            NOW,
+            NOW,
+        )
+    )
+    monitor = ReserveSupplyMonitor(
+        FakePorCollector(), FakeSupplyCollector(), storage, None
+    )
+
+    with pytest.raises(ValueError, match="timestamp"):
+        await monitor._coverage_update(NOW)
+
+    assert await storage.latest_observations(
+        "supply.estimated_collateralization", limit=1
+    ) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("supply_due", [True, False])
+@pytest.mark.parametrize(
+    "invalid_observed_at",
+    [NOW + timedelta(seconds=1), NOW.replace(tzinfo=None)],
+)
+async def test_invalid_collected_por_is_attributed_to_por_before_persistence(
+    storage, supply_due: bool, invalid_observed_at: datetime
+) -> None:
+    por = FakePorCollector()
+    por.queue_snapshot(por_snapshot_for(100, invalid_observed_at))
+    supply = FakeSupplyCollector()
+    if supply_due:
+        supply.queue_batch(
+            multichain_batch(
+                native_total=100,
+                bridged_total=1,
+                locked_total=1,
+                complete=True,
+            )
+        )
+    monitor = ReserveSupplyMonitor(por, supply, storage, None)
+    if not supply_due:
+        monitor._last_supply_run = NOW
+
+    result = await monitor.check_once(now=NOW)
+
+    assert result.success is False
+    assert len(result.errors) == 1
+    assert result.errors[0].startswith("por/oracle: ValueError:")
+    assert await storage.latest_observation("por.reserves", "ethereum") is None
+    assert await storage.get_risk_state("por.age") is None
+    por_health = await storage.get_collector_health("por")
+    assert por_health is not None and por_health.consecutive_failures == 1
+    supply_health = await storage.get_collector_health("supply")
+    if supply_due:
+        assert supply_health is not None and supply_health.consecutive_failures == 0
+    else:
+        assert supply_health is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("quality", ["ESTIMATED", "STALE", "UNKNOWN"])
+@pytest.mark.parametrize("stale_source", ["por", "supply"])
+async def test_coverage_requires_fact_quality_for_both_inputs(
+    storage, quality: str, stale_source: str
+) -> None:
+    await storage.insert_observation(
+        Observation(
+            "supply.estimated_collateralization",
+            "por+onchain_multichain",
+            "global",
+            105,
+            "percent",
+            NOW - timedelta(minutes=10),
+            NOW - timedelta(minutes=10),
+            quality="ESTIMATED",
+        )
+    )
+    await storage.insert_observation(
+        Observation(
+            "por.reserves", "por_oracle", "ethereum", 100,
+            "USD", NOW, NOW,
+            quality=quality if stale_source == "por" else "FACT",
+        )
+    )
+    await storage.insert_observation(
+        Observation(
+            "supply.multichain_total", "onchain_multichain", "global", 100,
+            "USD1", NOW, NOW,
+            quality=quality if stale_source == "supply" else "FACT",
+        )
+    )
+    monitor = ReserveSupplyMonitor(
+        FakePorCollector(), FakeSupplyCollector(), storage, None
+    )
+
+    await monitor._emit_and_evaluate_coverage(NOW)
+
+    rows = await storage.latest_observations(
+        "supply.estimated_collateralization", limit=5
+    )
+    assert len(rows) == 1
+    assert rows[0].value == 105
+
+
+@pytest.mark.asyncio
+async def test_coverage_uses_oldest_input_time_and_records_both_inputs(
+    storage,
+) -> None:
+    por_time = NOW - timedelta(minutes=20)
+    supply_time = NOW - timedelta(minutes=10)
+    await storage.insert_observation(
+        Observation(
+            "supply.estimated_collateralization",
+            "por+onchain_multichain",
+            "global",
+            110,
+            "percent",
+            NOW - timedelta(minutes=30),
+            NOW - timedelta(minutes=30),
+            quality="ESTIMATED",
+        )
+    )
+    await storage.insert_observation(
+        Observation(
+            "por.reserves", "por_oracle", "ethereum", 110,
+            "USD", por_time, NOW,
+        )
+    )
+    await storage.insert_observation(
+        Observation(
+            "supply.multichain_total", "onchain_multichain", "global", 100,
+            "USD1", supply_time, NOW,
+        )
+    )
+    monitor = ReserveSupplyMonitor(
+        FakePorCollector(), FakeSupplyCollector(), storage, None
+    )
+
+    observation, evaluations = await monitor._coverage_update(NOW)
+
+    row = await storage.latest_observation(
+        "supply.estimated_collateralization", "global"
+    )
+    assert observation is not None and row is not None
+    assert row.observed_at == por_time
+    assert row.collected_at == NOW
+    assert row.metadata == {
+        "por_observed_at": por_time.isoformat(),
+        "supply_observed_at": supply_time.isoformat(),
+    }
+    coverage = next(
+        item
+        for item in evaluations
+        if item.rule_id == "supply.estimated_coverage"
+    )
+    assert coverage.evidence["data_time"] == observation.observed_at.isoformat()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("age_seconds", "expected_count"), [(4500, 1), (4501, 0)]
+)
+async def test_supply_coverage_freshness_keeps_existing_4500_second_boundary(
+    storage, age_seconds: int, expected_count: int
+) -> None:
+    await storage.insert_observation(
+        Observation(
+            "por.reserves", "por_oracle", "ethereum", 100,
+            "USD", NOW, NOW,
+        )
+    )
+    observed_at = NOW - timedelta(seconds=age_seconds)
+    await storage.insert_observation(
+        Observation(
+            "supply.multichain_total", "onchain_multichain", "global", 100,
+            "USD1", observed_at, observed_at,
+        )
+    )
+    monitor = ReserveSupplyMonitor(
+        FakePorCollector(), FakeSupplyCollector(), storage, None
+    )
+
+    await monitor._emit_and_evaluate_coverage(NOW)
+
+    assert len(await storage.latest_observations(
+        "supply.estimated_collateralization", limit=2
+    )) == expected_count
+
+
+@pytest.mark.asyncio
+async def test_stale_por_does_not_overwrite_last_available_collateralization(
+    storage,
+) -> None:
+    await storage.insert_observation(
+        Observation(
+            "por.reserves", "por_oracle", "ethereum", 110,
+            "USD", NOW - timedelta(seconds=1799), NOW,
+        )
+    )
+    await storage.insert_observation(
+        Observation(
+            "supply.multichain_total", "onchain_multichain", "global", 100,
+            "USD1", NOW, NOW,
+        )
+    )
+    monitor = ReserveSupplyMonitor(
+        FakePorCollector(), FakeSupplyCollector(), storage, None
+    )
+    await monitor._emit_and_evaluate_coverage(NOW)
+
+    later = NOW + timedelta(seconds=2)
+    await storage.insert_observation(
+        Observation(
+            "por.reserves", "por_oracle", "ethereum", 90,
+            "USD", NOW - timedelta(seconds=1800), later,
+        )
+    )
+    await monitor._emit_and_evaluate_coverage(later)
+
+    rows = await storage.latest_observations(
+        "supply.estimated_collateralization", limit=5
+    )
+    assert len(rows) == 1
+    assert rows[0].value == pytest.approx(110)
 
 
 @pytest.mark.asyncio
