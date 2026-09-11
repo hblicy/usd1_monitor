@@ -43,6 +43,10 @@ RULE_LABELS = {
 }
 
 MONITOR_STALE_SECONDS = 900
+LEGACY_COLLECTOR_IDS = frozenset({"supply_ethereum", "supply_bsc"})
+LEGACY_HEALTH_RULE_IDS = frozenset(
+    f"health.{collector_id}" for collector_id in LEGACY_COLLECTOR_IDS
+)
 
 METRIC_KEYS = {
     ("market.mid_price", "USD1USDT"): "price_usd1usdt",
@@ -246,6 +250,7 @@ class DashboardRepository:
                 changed_at=datetime.fromisoformat(row["changed_at"]),
             )
             for row in rows
+            if str(row["rule_id"]) not in LEGACY_HEALTH_RULE_IDS
         ]
 
     async def _state_group(
@@ -327,6 +332,8 @@ class DashboardRepository:
         result: list[dict[str, object]] = []
         activities: list[datetime] = []
         for row in rows:
+            if str(row["collector_id"]) in LEGACY_COLLECTOR_IDS:
+                continue
             error = str(row["last_error"]) if row["last_error"] else None
             if error is not None:
                 for database_path in database_values:
@@ -371,6 +378,8 @@ class DashboardRepository:
             SELECT alert_key, content, created_at, delivered_at, status
             FROM alert_deliveries
             WHERE status != 'CANCELLED'
+              AND instr(alert_key, ':health.supply_ethereum:') = 0
+              AND instr(alert_key, ':health.supply_bsc:') = 0
             ORDER BY created_at DESC, id ASC
             LIMIT ?
             """,
@@ -529,6 +538,9 @@ class DashboardRepository:
             return None
         current_value = float(current["value"])
         if current_value <= 0:
+            return None
+        current_at = datetime.fromisoformat(str(current["observed_at"]))
+        if now - current_at > timedelta(seconds=4500):
             return None
         cutoff = now - timedelta(hours=24)
         cursor = await self.connection.execute(

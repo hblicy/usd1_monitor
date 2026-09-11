@@ -4,8 +4,11 @@ from datetime import UTC, datetime
 import pytest
 
 from usd1_monitor.collectors.multichain_supply import MultichainSupplySource
+from usd1_monitor.collectors.non_evm_supply import AptosSupplyCollector
 from usd1_monitor.collectors.supply import ComponentBatch, SupplySnapshot
 from usd1_monitor.models import Observation
+from usd1_monitor.supply_assets import APTOS_METADATA, APTOS_POOL
+from tests.fakes import FakeHttp
 
 
 NOW = datetime(2026, 9, 10, 4, 0, tzinfo=UTC)
@@ -141,6 +144,57 @@ async def test_complete_batch_aggregates_without_double_counting_bridged(
         "supply.bridged_total": 150,
         "bridge.locked_total": 155,
         "bridge.issuance_delta": -5,
+    }
+
+
+@pytest.mark.asyncio
+async def test_aptos_empty_pool_completes_multichain_aggregate() -> None:
+    http = FakeHttp()
+    aptos_url = "https://api.mainnet.aptoslabs.com/v1/graphql"
+    http.queue_json(
+        aptos_url,
+        {
+            "data": {
+                "fungible_asset_metadata": [
+                    {
+                        "asset_type": APTOS_METADATA,
+                        "decimals": 6,
+                        "supply_v2": 16_211_958_179_163,
+                    }
+                ],
+                "current_fungible_asset_balances": [],
+            }
+        },
+        method="POST",
+    )
+    replaced = {"native_aptos", "locked_aptos"}
+    sources = [
+        source
+        for source in component_sources_for_complete_batch()
+        if source.component_ids.isdisjoint(replaced)
+    ]
+    sources.append(AptosSupplyCollector(http, [aptos_url]))
+
+    batch = await MultichainSupplySource(sources).collect(NOW)
+
+    assert batch.complete is True
+    assert batch.errors == ()
+    totals = {
+        item.observation.metric: item.supply for item in batch.totals
+    }
+    assert totals == pytest.approx(
+        {
+            "supply.multichain_total": 16_213_558.179163,
+            "supply.bridged_total": 150,
+            "bridge.locked_total": 114,
+            "bridge.issuance_delta": 36,
+        }
+    )
+    assert len(http.calls) == 1
+    assert http.calls[0][:2] == ("POST", aptos_url)
+    assert http.calls[0][2]["variables"] == {
+        "asset": APTOS_METADATA,
+        "owner": APTOS_POOL,
     }
 
 

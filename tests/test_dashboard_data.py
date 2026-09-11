@@ -437,6 +437,34 @@ async def test_supply_change_24h_requires_recent_positive_baseline(
 
 
 @pytest.mark.asyncio
+async def test_supply_change_24h_rejects_stale_current_supply(storage) -> None:
+    await insert_observation(
+        storage,
+        "supply.multichain_total",
+        "global",
+        100.0,
+        observed_at=NOW - timedelta(hours=24, minutes=30),
+    )
+    await insert_observation(
+        storage,
+        "supply.multichain_total",
+        "global",
+        105.0,
+        observed_at=NOW - timedelta(seconds=4501),
+    )
+    repository = DashboardRepository(storage.path)
+    await repository.open()
+    try:
+        change = (await repository.snapshot(now=NOW))["metrics"][
+            "supply_change_24h"
+        ]
+    finally:
+        await repository.close()
+
+    assert change is None
+
+
+@pytest.mark.asyncio
 async def test_snapshot_sanitizes_collector_errors_and_exposes_health(storage) -> None:
     error = (
         "POST https://rpc.example/v3/secret-key?token=hidden failed status=429 "
@@ -465,6 +493,59 @@ async def test_snapshot_sanitizes_collector_errors_and_exposes_health(storage) -
     assert "secret-key" not in collector["last_error"]
     assert "token=hidden" not in collector["last_error"]
     assert str(storage.path.resolve()) not in collector["last_error"]
+
+
+@pytest.mark.asyncio
+async def test_snapshot_ignores_legacy_supply_health_rows(storage) -> None:
+    for collector_id in ("supply_ethereum", "supply_bsc"):
+        await storage.record_collector_failure(collector_id, NOW, "old 429")
+        await storage.set_risk_state(
+            f"health.{collector_id}", RiskLevel.RED, NOW, NOW
+        )
+    await storage.record_collector_success("supply_native_ethereum", NOW)
+    await storage.record_collector_success("supply_native_bsc", NOW)
+    repository = DashboardRepository(storage.path)
+    await repository.open()
+    try:
+        health = (await repository.snapshot(now=NOW))["health"]
+    finally:
+        await repository.close()
+
+    assert health["level"] == "UNKNOWN"
+    assert health["items"] == []
+    assert {item["collector_id"] for item in health["collectors"]} == {
+        "supply_native_ethereum",
+        "supply_native_bsc",
+    }
+
+
+@pytest.mark.asyncio
+async def test_snapshot_ignores_legacy_supply_recent_alerts(storage) -> None:
+    await storage.insert_pending_alert_uncommitted(
+        f"rule:2:market.price:{NOW.isoformat()}",
+        "current-alert",
+        "当前有效告警",
+        NOW,
+    )
+    for index, collector_id in enumerate(
+        ("supply_ethereum", "supply_bsc"), start=1
+    ):
+        created_at = NOW + timedelta(minutes=index)
+        await storage.insert_pending_alert_uncommitted(
+            f"rule:2:health.{collector_id}:{created_at.isoformat()}",
+            f"legacy-{collector_id}",
+            f"旧版 {collector_id} 429",
+            created_at,
+        )
+    await storage.connection.commit()
+    repository = DashboardRepository(storage.path)
+    await repository.open()
+    try:
+        alerts = (await repository.snapshot(now=NOW))["recent"]["alerts"]
+    finally:
+        await repository.close()
+
+    assert [item["content"] for item in alerts] == ["当前有效告警"]
 
 
 def test_dashboard_text_keeps_source_path_but_removes_url_secrets() -> None:
