@@ -57,8 +57,11 @@ def _uint256(value: int) -> str:
 def _solana_accounts(
     owner: str,
     amounts: list[int],
+    *,
+    slot: int = 123,
 ) -> dict[str, object]:
     return {
+        "context": {"slot": slot},
         "value": [
             {
                 "pubkey": f"account-{index}",
@@ -173,6 +176,7 @@ async def test_evm_accepts_zero_and_uint256_max_balances() -> None:
     assert result.trusted_complete is True
     assert result.observations[0].value == 0
     assert result.observations[1].value > 0
+    assert result.observations[1].metadata["raw_amount"] == str(2**256 - 1)
 
 
 @pytest.mark.asyncio
@@ -231,6 +235,7 @@ async def test_evm_address_metadata_contains_identity_and_evidence() -> None:
         "verified_on": "2026-09-11",
         "safe_block": 4,
         "max_age_seconds": 1200,
+        "raw_amount": str(2 * 10**18),
     }
 
 
@@ -249,7 +254,9 @@ async def test_solana_owner_sums_all_usd1_token_accounts() -> None:
 
     assert result.observations[0].value == 10
     assert result.observations[0].metadata["token_accounts"] == 2
-    assert result.observations[0].metadata["safe_block"] == "finalized"
+    assert result.observations[0].metadata["safe_block"] == 123
+    assert result.observations[0].metadata["commitment"] == "finalized"
+    assert result.safe_block == 123
     assert rpc.calls_for("getTokenAccountsByOwner") == [
         [
             owner.address,
@@ -326,6 +333,133 @@ async def test_solana_malformed_outer_or_account_structure_fails(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"value": []},
+        {"context": None, "value": []},
+        {"context": {}, "value": []},
+        {"context": {"slot": True}, "value": []},
+        {"context": {"slot": -1}, "value": []},
+        {"context": {"slot": "123"}, "value": []},
+    ],
+)
+async def test_solana_missing_or_malformed_context_slot_fails(
+    body: object,
+) -> None:
+    owner = _address(chain="solana", address=SOLANA_OWNER, label="Binance SOL")
+    rpc = FakeRpc()
+    rpc.result("getTokenAccountsByOwner", body)
+
+    result = await CustodyBalanceCollector({}, rpc).collect_solana(
+        [owner], NOW, trusted_addresses=[owner]
+    )
+
+    assert result.observations == ()
+    assert result.trusted_complete is False
+    assert result.trusted_balance is None
+    assert "context.slot" in str(result.errors[0].error)
+
+
+@pytest.mark.asyncio
+async def test_multiple_trusted_solana_owners_require_same_real_slot() -> None:
+    first = _address(chain="solana", address=SOLANA_OWNER, label="First")
+    second = _address(
+        chain="solana",
+        address="2ojv9BAiHUrvsm9gxDe7fJSzbNZSJcxZvf8dqmWGHG8S",
+        label="Second",
+    )
+    rpc = FakeRpc()
+    rpc.result(
+        "getTokenAccountsByOwner",
+        _solana_accounts(first.address, [1_000_000], slot=900),
+    )
+    rpc.result(
+        "getTokenAccountsByOwner",
+        _solana_accounts(second.address, [2_000_000], slot=900),
+    )
+
+    result = await CustodyBalanceCollector({}, rpc).collect_solana(
+        [first, second], NOW, trusted_addresses=[first, second]
+    )
+
+    assert result.trusted_complete is True
+    assert result.trusted_balance == 3
+    assert result.safe_block == 900
+    assert {item.metadata["safe_block"] for item in result.observations} == {900}
+
+
+@pytest.mark.asyncio
+async def test_trusted_solana_slot_drift_blocks_trusted_aggregate() -> None:
+    first = _address(chain="solana", address=SOLANA_OWNER, label="First")
+    second = _address(
+        chain="solana",
+        address="2ojv9BAiHUrvsm9gxDe7fJSzbNZSJcxZvf8dqmWGHG8S",
+        label="Second",
+    )
+    rpc = FakeRpc()
+    rpc.result(
+        "getTokenAccountsByOwner",
+        _solana_accounts(first.address, [1_000_000], slot=900),
+    )
+    rpc.result(
+        "getTokenAccountsByOwner",
+        _solana_accounts(second.address, [2_000_000], slot=901),
+    )
+
+    result = await CustodyBalanceCollector({}, rpc).collect_solana(
+        [first, second], NOW, trusted_addresses=[first, second]
+    )
+
+    assert result.trusted_complete is False
+    assert result.trusted_balance is None
+    assert result.safe_block == 900
+    assert any(
+        failure.label == "Second" and "slot drift" in str(failure.error)
+        for failure in result.errors
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("candidate_slot", [None, 901])
+async def test_candidate_slot_error_does_not_pollute_trusted_set(
+    candidate_slot: int | None,
+) -> None:
+    trusted = _address(chain="solana", address=SOLANA_OWNER, label="Trusted")
+    candidate = _address(
+        chain="solana",
+        address="2ojv9BAiHUrvsm9gxDe7fJSzbNZSJcxZvf8dqmWGHG8S",
+        label="Candidate",
+        status="candidate",
+        verified_on=None,
+    )
+    candidate_body = _solana_accounts(
+        candidate.address,
+        [9_000_000],
+        slot=candidate_slot or 900,
+    )
+    if candidate_slot is None:
+        candidate_body.pop("context")
+    rpc = FakeRpc()
+    rpc.result(
+        "getTokenAccountsByOwner",
+        _solana_accounts(trusted.address, [3_000_000], slot=900),
+    )
+    rpc.result("getTokenAccountsByOwner", candidate_body)
+
+    result = await CustodyBalanceCollector({}, rpc).collect_solana(
+        [trusted, candidate], NOW, trusted_addresses=[trusted]
+    )
+
+    assert result.trusted_complete is True
+    assert result.trusted_balance == 3
+    assert [item.metadata["label"] for item in result.observations] == ["Trusted"]
+    assert result.errors[0].label == "Candidate"
+    expected = "context.slot" if candidate_slot is None else "slot drift"
+    assert expected in str(result.errors[0].error)
+
+
+@pytest.mark.asyncio
 async def test_solana_duplicate_account_fails_instead_of_double_counting() -> None:
     owner = _address(chain="solana", address=SOLANA_OWNER, label="Binance SOL")
     body = _solana_accounts(owner.address, [1_000_000, 2_000_000])
@@ -346,7 +480,7 @@ async def test_solana_duplicate_account_fails_instead_of_double_counting() -> No
 async def test_solana_empty_token_account_list_is_a_valid_zero_balance() -> None:
     owner = _address(chain="solana", address=SOLANA_OWNER, label="Binance SOL")
     rpc = FakeRpc()
-    rpc.result("getTokenAccountsByOwner", {"value": []})
+    rpc.result("getTokenAccountsByOwner", {"context": {"slot": 123}, "value": []})
 
     result = await CustodyBalanceCollector({}, rpc).collect_solana(
         [owner], NOW, trusted_addresses=[owner]
@@ -433,7 +567,7 @@ async def test_trusted_rpc_failure_makes_trusted_set_incomplete() -> None:
 async def test_duplicate_solana_owner_is_only_requested_once() -> None:
     owner = _address(chain="solana", address=SOLANA_OWNER, label="Wallet")
     rpc = FakeRpc()
-    rpc.result("getTokenAccountsByOwner", {"value": []})
+    rpc.result("getTokenAccountsByOwner", {"context": {"slot": 123}, "value": []})
 
     result = await CustodyBalanceCollector({}, rpc).collect_solana(
         [owner, owner], NOW, trusted_addresses=[owner]

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import math
 import re
 from dataclasses import dataclass
 from datetime import datetime
@@ -127,8 +129,16 @@ def _parse_evm_balance(value: object, chain: str, address: str) -> int:
     return int(value, 16)
 
 
-def _parse_solana_accounts(value: object, owner: str) -> tuple[int, int]:
-    if not isinstance(value, dict) or not isinstance(value.get("value"), list):
+def _parse_solana_accounts(value: object, owner: str) -> tuple[int, int, int]:
+    if not isinstance(value, dict):
+        raise CustodyDataError("Solana token accounts response is malformed")
+    context = value.get("context")
+    if not isinstance(context, dict):
+        raise CustodyDataError("Solana response context.slot is malformed")
+    slot = context.get("slot")
+    if isinstance(slot, bool) or not isinstance(slot, int) or slot < 0:
+        raise CustodyDataError("Solana response context.slot is malformed")
+    if not isinstance(value.get("value"), list):
         raise CustodyDataError("Solana token accounts response is malformed")
 
     raw_total = 0
@@ -173,7 +183,7 @@ def _parse_solana_accounts(value: object, owner: str) -> tuple[int, int]:
         if raw_amount > 2**64 - 1:
             raise CustodyDataError("Solana token account amount exceeds uint64")
         raw_total += raw_amount
-    return raw_total, len(accounts)
+    return slot, raw_total, len(accounts)
 
 
 class CustodyBalanceCollector:
@@ -255,22 +265,29 @@ class CustodyBalanceCollector:
                     ],
                 )
                 amount = _parse_evm_balance(raw, chain, item.address)
+                balance = amount / 10**18
+                if not math.isfinite(balance):
+                    raise CustodyDataError(
+                        f"{chain} custody address {item.address} balance is not finite"
+                    )
+                metadata = _metadata(
+                    item,
+                    effective_trusted=is_trusted,
+                    safe_block=safe_block,
+                    max_age_seconds=self._interval_seconds * 2,
+                )
+                metadata["raw_amount"] = str(amount)
                 observations.append(
                     Observation(
                         "custody.address_balance",
                         "evm_rpc",
                         f"{chain}:{item.address.casefold()}",
-                        float(amount / 10**18),
+                        float(balance),
                         "USD1",
                         collected_at,
                         collected_at,
                         quality="FACT",
-                        metadata=_metadata(
-                            item,
-                            effective_trusted=is_trusted,
-                            safe_block=safe_block,
-                            max_age_seconds=self._interval_seconds * 2,
-                        ),
+                        metadata=metadata,
                     )
                 )
             except Exception as exc:
@@ -306,12 +323,9 @@ class CustodyBalanceCollector:
         if self._solana_rpc is None:
             raise CustodyDataError("no custody RPC configured for solana")
 
-        observations: list[Observation] = []
-        errors: list[CustodyFailure] = []
-        trusted_complete = True
-        for item in unique:
-            key = _address_key(item)
-            is_trusted = key in trusted_keys
+        async def fetch(
+            item: CustodyAddressConfig,
+        ) -> tuple[int, int, int] | Exception:
             try:
                 body = await self._solana_rpc.call(
                     "getTokenAccountsByOwner",
@@ -324,17 +338,67 @@ class CustodyBalanceCollector:
                         },
                     ],
                 )
-                raw_total, token_accounts = _parse_solana_accounts(
-                    body, item.address
+                return _parse_solana_accounts(body, item.address)
+            except Exception as exc:
+                return exc
+
+        fetched = await asyncio.gather(*(fetch(item) for item in unique))
+        parsed = [
+            (item, result)
+            for item, result in zip(unique, fetched, strict=True)
+            if not isinstance(result, Exception)
+        ]
+        trusted_slots = [
+            result[0]
+            for item, result in parsed
+            if _address_key(item) in trusted_keys
+        ]
+        reference_slot = (
+            trusted_slots[0]
+            if trusted_slots
+            else (parsed[0][1][0] if parsed else None)
+        )
+
+        observations: list[Observation] = []
+        errors: list[CustodyFailure] = []
+        trusted_complete = True
+        for item, result in zip(unique, fetched, strict=True):
+            key = _address_key(item)
+            is_trusted = key in trusted_keys
+            if isinstance(result, Exception):
+                error = CustodyDataError(
+                    f"solana custody address {item.address} ({item.label}) failed: "
+                    f"{type(result).__name__}: {result}"
                 )
+                errors.append(
+                    CustodyFailure("solana", item.address, item.label, error)
+                )
+                if is_trusted:
+                    trusted_complete = False
+                continue
+
+            slot, raw_total, token_accounts = result
+            if reference_slot is not None and slot != reference_slot:
+                error = CustodyDataError(
+                    f"solana custody address {item.address} ({item.label}) "
+                    f"slot drift: expected {reference_slot}, received {slot}"
+                )
+                errors.append(
+                    CustodyFailure("solana", item.address, item.label, error)
+                )
+                if is_trusted:
+                    trusted_complete = False
+                continue
+            try:
                 metadata = _metadata(
                     item,
                     effective_trusted=is_trusted,
-                    safe_block="finalized",
+                    safe_block=slot,
                     max_age_seconds=self._interval_seconds * 2,
                 )
                 metadata.update(
                     {
+                        "commitment": "finalized",
                         "token_accounts": token_accounts,
                         "raw_amount": str(raw_total),
                     }
@@ -366,5 +430,5 @@ class CustodyBalanceCollector:
             tuple(observations),
             tuple(errors),
             trusted_complete,
-            "finalized",
+            reference_slot,
         )
