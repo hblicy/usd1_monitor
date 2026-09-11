@@ -1,3 +1,4 @@
+from datetime import date
 from pathlib import Path
 
 from usd1_monitor.config import load_config
@@ -11,6 +12,36 @@ LEGACY_DEPLOYMENT_PATHS = (
     "/var/log/usd1-monitor",
 )
 
+EXPECTED_EVM_ADDRESSES = {
+    "0xf977814e90da44bfa03b6295a0616a897441acec",
+    "0x5a52e96bacdabb82fd05763e25335261b270efcb",
+    "0x28c6c06298d514db089934071355e5743bf21d60",
+    "0x47ac0fb4f2d84898e4d9e7b4dab3c24507a6d503",
+    "0x21a31ee1afc51d94c2efccaa2092ad1028285549",
+    "0xdfd5293d8e347dfe59e90efd55b2956a1343963d",
+    "0xbe0eb53f46cd790cd13851d5eff43d12404d33e8",
+    "0x8894e0a0c962cb723c1976a4421c95949be2d4e3",
+    "0xe2fc31f816a9b94326492132018c3aecc4a93ae1",
+    "0x9696f59e4d72e237be84ffd425dcad154bf96976",
+    "0x56eddb7aa87536c09ccc2793473599fd21a8b17f",
+    "0x4976a4a02f38326660d17bf34b431dc6e2eb2327",
+    "0x01c952174c24e1210d26961d456a77a39e1f0bb0",
+}
+EXPECTED_SOLANA_BINANCE = {
+    "5tzFkiKscXHK5ZXCGbXZxdw7gTjjD1mBwuoFbhUvuAi9",
+    "2ojv9BAiHUrvsm9gxDe7fJSzbNZSJcxZvf8dqmWGHG8S",
+    "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM",
+    "3yFwqXBfZY4jBVUafQ1YEXw189y2dN3V5KQq9uzBDy1E",
+    "3gd3dqgtJ4jWfBfLYTX67DALFetjc5iS72sCgRhCkW2u",
+    "6QJzieMYfp7yr3EdrePaQoG3Ghxs2wM98xSLRu8Xh56U",
+}
+EXPECTED_SOLANA_FIREBLOCKS = "9Rycov3U4efJf5HiqZYGjN7qJJHEtMsj4vbmkG4xfCxk"
+EXPECTED_WHALES = {
+    "0xAC3E216bD55860912062a4027A03b99587B7FfC7",
+    "0x041c32c919de3e85e0D89984c2590434f6569dFA",
+}
+BINANCE_EVIDENCE_URL = "https://www.binance.com/en/square/post/97671"
+
 
 def test_example_config_is_loadable() -> None:
     config = load_config(Path("config.example.yaml"), environ={})
@@ -21,6 +52,101 @@ def test_example_config_is_loadable() -> None:
     assert config.supply.multichain.tempo_rpc_urls == [
         "https://rpc.presto.tempo.xyz"
     ]
+
+
+def test_core_risk_examples_have_explicit_address_inventory_without_credentials() -> None:
+    expected_addresses = 37
+    expected_statuses = {"trusted": 26, "candidate": 11}
+    expected_entities = {
+        "binance_cex": 30,
+        "binance_peg_reserve": 2,
+        "fireblocks_custody": 1,
+        "unlabeled_whale": 4,
+    }
+
+    for path in (
+        Path("config.example.yaml"),
+        Path("deploy/config.production.example.yaml"),
+    ):
+        config = load_config(path, environ={})
+        addresses = config.custody.addresses
+
+        assert len(addresses) == expected_addresses
+        assert {
+            status: sum(item.status == status for item in addresses)
+            for status in expected_statuses
+        } == expected_statuses
+        assert {
+            entity: sum(item.entity == entity for item in addresses)
+            for entity in expected_entities
+        } == expected_entities
+        assert all(item.status == "candidate" for item in addresses if item.chain == "solana")
+        assert all(
+            "${" not in url
+            and "token" not in url.casefold()
+            and "secret" not in url.casefold()
+            for values in config.redemption.model_dump().values()
+            if isinstance(values, list)
+            for url in values
+            if isinstance(url, str)
+        )
+
+
+def test_core_risk_examples_lock_the_exact_address_inventory() -> None:
+    for path in (
+        Path("config.example.yaml"),
+        Path("deploy/config.production.example.yaml"),
+    ):
+        config = load_config(path, environ={})
+        addresses = config.custody.addresses
+        evm = [item for item in addresses if item.chain in {"ethereum", "bsc"}]
+        assert {item.address.lower() for item in evm if item.entity != "unlabeled_whale"} == (
+            EXPECTED_EVM_ADDRESSES
+        )
+        assert {
+            item.address
+            for item in addresses
+            if item.chain == "solana" and item.entity == "binance_cex"
+        } == EXPECTED_SOLANA_BINANCE
+        assert {
+            item.address
+            for item in addresses
+            if item.chain == "solana" and item.entity == "fireblocks_custody"
+        } == {EXPECTED_SOLANA_FIREBLOCKS}
+        assert {
+            item.address
+            for item in addresses
+            if item.entity == "unlabeled_whale"
+        } == EXPECTED_WHALES
+
+        for item in evm:
+            if item.entity == "unlabeled_whale":
+                assert item.status == "candidate"
+                assert item.role == "whale"
+                continue
+            assert item.status == "trusted"
+            assert item.verified_on == date(2026, 9, 11)
+            assert item.evidence[0].kind == "official"
+            assert item.evidence[0].url == BINANCE_EVIDENCE_URL
+            if item.address.lower() == "0x47ac0fb4f2d84898e4d9e7b4dab3c24507a6d503":
+                assert item.entity == "binance_peg_reserve"
+                assert item.role == "reserve"
+            elif item.address.lower() == "0xbe0eb53f46cd790cd13851d5eff43d12404d33e8":
+                assert item.entity == "binance_cex"
+                assert item.role == "cold_wallet"
+            else:
+                assert item.entity == "binance_cex"
+                assert item.role == "hot_wallet"
+
+        for item in addresses:
+            if item.chain == "solana":
+                assert item.status == "candidate"
+                assert item.verified_on is None
+                assert len(item.evidence) == 1
+                assert item.evidence[0].kind == "label"
+            if item.entity == "unlabeled_whale":
+                assert item.chain in {"ethereum", "bsc"}
+                assert item.status == "candidate"
 
 
 def test_examples_use_ten_minute_permission_monitoring() -> None:

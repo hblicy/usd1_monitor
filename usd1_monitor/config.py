@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import os
 import re
+from datetime import date
 from pathlib import Path
-from typing import Mapping
+from typing import Literal, Mapping
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -28,6 +29,188 @@ class ConfigError(ValueError):
 
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+
+class AddressEvidenceConfig(StrictModel):
+    kind: Literal["official", "label"]
+    url: str
+
+    @field_validator("url")
+    @classmethod
+    def validate_url(cls, value: str) -> str:
+        parts = urlsplit(value)
+        try:
+            port = parts.port
+        except ValueError as exc:
+            raise ValueError("address evidence must be a valid HTTPS URL") from exc
+        if (
+            parts.scheme != "https"
+            or not parts.hostname
+            or parts.username is not None
+            or parts.password is not None
+            or port not in (None, 443)
+        ):
+            raise ValueError("address evidence must be a valid HTTPS URL")
+        return value
+
+
+class CustodyAddressConfig(StrictModel):
+    chain: Literal["ethereum", "bsc", "solana"]
+    address: str
+    entity: Literal[
+        "binance_cex",
+        "binance_peg_reserve",
+        "fireblocks_custody",
+        "bitgo_issuer",
+        "unlabeled_whale",
+    ]
+    label: str = Field(min_length=1)
+    role: Literal[
+        "hot_wallet",
+        "cold_wallet",
+        "reserve",
+        "custody",
+        "issuer",
+        "whale",
+    ]
+    status: Literal["trusted", "candidate"] = "candidate"
+    verified_on: date | None = None
+    evidence: list[AddressEvidenceConfig] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_identity_and_evidence(self) -> "CustodyAddressConfig":
+        if self.chain in {"ethereum", "bsc"}:
+            if re.fullmatch(r"0x[0-9a-fA-F]{40}", self.address) is None:
+                raise ValueError("EVM custody address must be a 20-byte hex address")
+        elif re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{32,44}", self.address) is None:
+            raise ValueError("Solana custody address must be base58")
+
+        hosts = [_normalize_evidence_host(item.url) for item in self.evidence]
+        if len(hosts) != len(set(hosts)):
+            raise ValueError("address evidence hosts must be independent")
+
+        owner_hosts = {
+            "binance_cex": {"binance.com"},
+            "binance_peg_reserve": {"binance.com"},
+            "fireblocks_custody": {"fireblocks.com"},
+            "bitgo_issuer": {"bitgo.com"},
+            "unlabeled_whale": set(),
+        }[self.entity]
+        official_hosts = [
+            _normalize_evidence_host(item.url)
+            for item in self.evidence
+            if item.kind == "official"
+        ]
+        if any(host not in owner_hosts for host in official_hosts):
+            raise ValueError("official evidence host does not match entity")
+
+        if self.status != "trusted":
+            return self
+        if self.verified_on is None:
+            raise ValueError("trusted address requires verified_on")
+
+        official = bool(official_hosts)
+        if not official and len(self.evidence) < 2:
+            raise ValueError(
+                "trusted address requires one official source or two independent labels"
+            )
+        return self
+
+
+class CustodyConfig(StrictModel):
+    interval_seconds: int = Field(default=600, ge=60)
+    verification_max_age_days: int = Field(default=90, ge=1)
+    yellow_share: float = Field(default=0.50, gt=0, lt=1)
+    red_share: float = Field(default=0.70, gt=0, lt=1)
+    entity_flow_24h: float = Field(default=50_000_000, gt=0)
+    address_outflow_1h: float = Field(default=100_000_000, gt=0)
+    recovery_checks: int = Field(default=2, ge=1)
+    addresses: list[CustodyAddressConfig] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_thresholds_and_duplicates(self) -> "CustodyConfig":
+        if self.red_share <= self.yellow_share:
+            raise ValueError("custody red_share must exceed yellow_share")
+        keys = [
+            (
+                item.chain,
+                item.address.casefold()
+                if item.chain in {"ethereum", "bsc"}
+                else item.address,
+            )
+            for item in self.addresses
+        ]
+        if len(keys) != len(set(keys)):
+            raise ValueError("custody addresses must be unique within each chain")
+        for item in self.addresses:
+            if (
+                item.status == "trusted"
+                and item.verified_on is not None
+                and (date.today() - item.verified_on).days
+                > self.verification_max_age_days
+            ):
+                raise ValueError(
+                    "address verification is older than "
+                    f"{self.verification_max_age_days} days"
+                )
+        return self
+
+
+class RedemptionConfig(StrictModel):
+    status_url: str = "https://status.bitgo.com/api/v2/summary.json"
+    status_interval_seconds: int = Field(default=300, ge=60)
+    page_interval_seconds: int = Field(default=3600, ge=300)
+    recovery_checks: int = Field(default=2, ge=1)
+    official_page_urls: list[str] = Field(
+        default_factory=lambda: [
+            "https://www.bitgo.com/usd1/",
+            "https://www.bitgo.com/usd1-terms/",
+            "https://investors.bitgo.com/news/default.aspx",
+            "https://docs.worldlibertyfinancial.com/resources/faq",
+        ]
+    )
+    media_rss_urls: list[str] = Field(default_factory=list)
+
+    @field_validator("status_url")
+    @classmethod
+    def validate_status_url(cls, value: str) -> str:
+        parts = urlsplit(value)
+        if parts.scheme != "https" or parts.hostname != "status.bitgo.com":
+            raise ValueError("redemption status_url must use status.bitgo.com")
+        return value
+
+    @field_validator("official_page_urls")
+    @classmethod
+    def validate_official_pages(cls, values: list[str]) -> list[str]:
+        allowed = {
+            "www.bitgo.com",
+            "bitgo.com",
+            "investors.bitgo.com",
+            "docs.worldlibertyfinancial.com",
+        }
+        if not values:
+            raise ValueError("redemption official_page_urls must not be empty")
+        for value in values:
+            parts = urlsplit(value)
+            if parts.scheme != "https" or parts.hostname not in allowed:
+                raise ValueError("redemption official page is outside allowlist")
+        return values
+
+    @field_validator("media_rss_urls")
+    @classmethod
+    def validate_media_rss_urls(cls, values: list[str]) -> list[str]:
+        for value in values:
+            parts = urlsplit(value)
+            if parts.scheme != "https" or not parts.hostname:
+                raise ValueError("redemption media RSS URLs must be HTTPS")
+        return values
+
+
+def _normalize_evidence_host(url: str) -> str:
+    host = urlsplit(url).hostname
+    if not host:
+        return ""
+    return host.casefold().removeprefix("www.")
 
 
 class HttpConfig(StrictModel):
@@ -352,6 +535,8 @@ class AppConfig(StrictModel):
     por: PorConfig = Field(default_factory=PorConfig)
     supply: SupplyConfig = Field(default_factory=SupplyConfig)
     information: InformationConfig = Field(default_factory=InformationConfig)
+    custody: CustodyConfig = Field(default_factory=CustodyConfig)
+    redemption: RedemptionConfig = Field(default_factory=RedemptionConfig)
     dashboard: DashboardConfig = Field(default_factory=DashboardConfig)
     wechat_webhook: str | None = None
 

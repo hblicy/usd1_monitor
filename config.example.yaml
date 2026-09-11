@@ -55,6 +55,385 @@ chains:
     scan_batch_blocks: 2000
     log_query_chunk_blocks: 500
 watched_addresses: []
+custody:
+  interval_seconds: 600
+  verification_max_age_days: 90
+  yellow_share: 0.50
+  red_share: 0.70
+  entity_flow_24h: 50000000
+  address_outflow_1h: 100000000
+  recovery_checks: 2
+  addresses:
+    - chain: ethereum
+      address: "0xf977814e90da44bfa03b6295a0616a897441acec"
+      entity: binance_cex
+      label: Binance 8 / ETH
+      role: hot_wallet
+      status: trusted
+      verified_on: 2026-09-11
+      evidence:
+        - kind: official
+          url: https://www.binance.com/en/square/post/97671
+    - chain: bsc
+      address: "0xf977814e90da44bfa03b6295a0616a897441acec"
+      entity: binance_cex
+      label: Binance 8 / BSC
+      role: hot_wallet
+      status: trusted
+      verified_on: 2026-09-11
+      evidence:
+        - kind: official
+          url: https://www.binance.com/en/square/post/97671
+    - chain: ethereum
+      address: "0x5a52e96bacdabb82fd05763e25335261b270efcb"
+      entity: binance_cex
+      label: Binance 14 / ETH
+      role: hot_wallet
+      status: trusted
+      verified_on: 2026-09-11
+      evidence:
+        - kind: official
+          url: https://www.binance.com/en/square/post/97671
+    - chain: bsc
+      address: "0x5a52e96bacdabb82fd05763e25335261b270efcb"
+      entity: binance_cex
+      label: Binance 14 / BSC
+      role: hot_wallet
+      status: trusted
+      verified_on: 2026-09-11
+      evidence:
+        - kind: official
+          url: https://www.binance.com/en/square/post/97671
+    - chain: ethereum
+      address: "0x28c6c06298d514db089934071355e5743bf21d60"
+      entity: binance_cex
+      label: Binance 14 / ETH
+      role: hot_wallet
+      status: trusted
+      verified_on: 2026-09-11
+      evidence:
+        - kind: official
+          url: https://www.binance.com/en/square/post/97671
+    - chain: bsc
+      address: "0x28c6c06298d514db089934071355e5743bf21d60"
+      entity: binance_cex
+      label: Binance 14 / BSC
+      role: hot_wallet
+      status: trusted
+      verified_on: 2026-09-11
+      evidence:
+        - kind: official
+          url: https://www.binance.com/en/square/post/97671
+    - chain: ethereum
+      address: "0x47ac0fb4f2d84898e4d9e7b4dab3c24507a6d503"
+      entity: binance_peg_reserve
+      label: Binance-Peg Reserve / ETH
+      role: reserve
+      status: trusted
+      verified_on: 2026-09-11
+      evidence:
+        - kind: official
+          url: https://www.binance.com/en/square/post/97671
+    - chain: bsc
+      address: "0x47ac0fb4f2d84898e4d9e7b4dab3c24507a6d503"
+      entity: binance_peg_reserve
+      label: Binance-Peg Reserve / BSC
+      role: reserve
+      status: trusted
+      verified_on: 2026-09-11
+      evidence:
+        - kind: official
+          url: https://www.binance.com/en/square/post/97671
+    - chain: ethereum
+      address: "0x21a31ee1afc51d94c2efccaa2092ad1028285549"
+      entity: binance_cex
+      label: Binance 21 / ETH
+      role: hot_wallet
+      status: trusted
+      verified_on: 2026-09-11
+      evidence:
+        - kind: official
+          url: https://www.binance.com/en/square/post/97671
+    - chain: bsc
+      address: "0x21a31ee1afc51d94c2efccaa2092ad1028285549"
+      entity: binance_cex
+      label: Binance 21 / BSC
+      role: hot_wallet
+      status: trusted
+      verified_on: 2026-09-11
+      evidence:
+        - kind: official
+          url: https://www.binance.com/en/square/post/97671
+    - chain: ethereum
+      address: "0xdfd5293d8e347dfe59e90efd55b2956a1343963d"
+      entity: binance_cex
+      label: Binance 21 / ETH
+      role: hot_wallet
+      status: trusted
+      verified_on: 2026-09-11
+      evidence:
+        - kind: official
+          url: https://www.binance.com/en/square/post/97671
+    - chain: bsc
+      address: "0xdfd5293d8e347dfe59e90efd55b2956a1343963d"
+      entity: binance_cex
+      label: Binance 21 / BSC
+      role: hot_wallet
+      status: trusted
+      verified_on: 2026-09-11
+      evidence:
+        - kind: official
+          url: https://www.binance.com/en/square/post/97671
+    - chain: ethereum
+      address: "0xbe0eb53f46cd790cd13851d5eff43d12404d33e8"
+      entity: binance_cex
+      label: Binance Cold Wallet / ETH
+      role: cold_wallet
+      status: trusted
+      verified_on: 2026-09-11
+      evidence:
+        - kind: official
+          url: https://www.binance.com/en/square/post/97671
+    - chain: bsc
+      address: "0xbe0eb53f46cd790cd13851d5eff43d12404d33e8"
+      entity: binance_cex
+      label: Binance Cold Wallet / BSC
+      role: cold_wallet
+      status: trusted
+      verified_on: 2026-09-11
+      evidence:
+        - kind: official
+          url: https://www.binance.com/en/square/post/97671
+    - chain: ethereum
+      address: "0x8894e0a0c962cb723c1976a4421c95949be2d4e3"
+      entity: binance_cex
+      label: Binance Hot Wallet / ETH
+      role: hot_wallet
+      status: trusted
+      verified_on: 2026-09-11
+      evidence:
+        - kind: official
+          url: https://www.binance.com/en/square/post/97671
+    - chain: bsc
+      address: "0x8894e0a0c962cb723c1976a4421c95949be2d4e3"
+      entity: binance_cex
+      label: Binance Hot Wallet / BSC
+      role: hot_wallet
+      status: trusted
+      verified_on: 2026-09-11
+      evidence:
+        - kind: official
+          url: https://www.binance.com/en/square/post/97671
+    - chain: ethereum
+      address: "0xe2fc31f816a9b94326492132018c3aecc4a93ae1"
+      entity: binance_cex
+      label: Binance Hot Wallet / ETH
+      role: hot_wallet
+      status: trusted
+      verified_on: 2026-09-11
+      evidence:
+        - kind: official
+          url: https://www.binance.com/en/square/post/97671
+    - chain: bsc
+      address: "0xe2fc31f816a9b94326492132018c3aecc4a93ae1"
+      entity: binance_cex
+      label: Binance Hot Wallet / BSC
+      role: hot_wallet
+      status: trusted
+      verified_on: 2026-09-11
+      evidence:
+        - kind: official
+          url: https://www.binance.com/en/square/post/97671
+    - chain: ethereum
+      address: "0x9696f59e4d72e237be84ffd425dcad154bf96976"
+      entity: binance_cex
+      label: Binance Hot Wallet / ETH
+      role: hot_wallet
+      status: trusted
+      verified_on: 2026-09-11
+      evidence:
+        - kind: official
+          url: https://www.binance.com/en/square/post/97671
+    - chain: bsc
+      address: "0x9696f59e4d72e237be84ffd425dcad154bf96976"
+      entity: binance_cex
+      label: Binance Hot Wallet / BSC
+      role: hot_wallet
+      status: trusted
+      verified_on: 2026-09-11
+      evidence:
+        - kind: official
+          url: https://www.binance.com/en/square/post/97671
+    - chain: ethereum
+      address: "0x56eddb7aa87536c09ccc2793473599fd21a8b17f"
+      entity: binance_cex
+      label: Binance Hot Wallet / ETH
+      role: hot_wallet
+      status: trusted
+      verified_on: 2026-09-11
+      evidence:
+        - kind: official
+          url: https://www.binance.com/en/square/post/97671
+    - chain: bsc
+      address: "0x56eddb7aa87536c09ccc2793473599fd21a8b17f"
+      entity: binance_cex
+      label: Binance Hot Wallet / BSC
+      role: hot_wallet
+      status: trusted
+      verified_on: 2026-09-11
+      evidence:
+        - kind: official
+          url: https://www.binance.com/en/square/post/97671
+    - chain: ethereum
+      address: "0x4976a4a02f38326660d17bf34b431dc6e2eb2327"
+      entity: binance_cex
+      label: Binance Hot Wallet / ETH
+      role: hot_wallet
+      status: trusted
+      verified_on: 2026-09-11
+      evidence:
+        - kind: official
+          url: https://www.binance.com/en/square/post/97671
+    - chain: bsc
+      address: "0x4976a4a02f38326660d17bf34b431dc6e2eb2327"
+      entity: binance_cex
+      label: Binance Hot Wallet / BSC
+      role: hot_wallet
+      status: trusted
+      verified_on: 2026-09-11
+      evidence:
+        - kind: official
+          url: https://www.binance.com/en/square/post/97671
+    - chain: ethereum
+      address: "0x01c952174c24e1210d26961d456a77a39e1f0bb0"
+      entity: binance_cex
+      label: Binance Hot Wallet / ETH
+      role: hot_wallet
+      status: trusted
+      verified_on: 2026-09-11
+      evidence:
+        - kind: official
+          url: https://www.binance.com/en/square/post/97671
+    - chain: bsc
+      address: "0x01c952174c24e1210d26961d456a77a39e1f0bb0"
+      entity: binance_cex
+      label: Binance Hot Wallet / BSC
+      role: hot_wallet
+      status: trusted
+      verified_on: 2026-09-11
+      evidence:
+        - kind: official
+          url: https://www.binance.com/en/square/post/97671
+    - chain: solana
+      address: 5tzFkiKscXHK5ZXCGbXZxdw7gTjjD1mBwuoFbhUvuAi9
+      entity: binance_cex
+      label: Binance SOL hot wallet 1
+      role: hot_wallet
+      status: candidate
+      evidence:
+        - kind: label
+          url: https://solscan.io/account/5tzFkiKscXHK5ZXCGbXZxdw7gTjjD1mBwuoFbhUvuAi9
+    - chain: solana
+      address: 2ojv9BAiHUrvsm9gxDe7fJSzbNZSJcxZvf8dqmWGHG8S
+      entity: binance_cex
+      label: Binance SOL hot wallet 2
+      role: hot_wallet
+      status: candidate
+      evidence:
+        - kind: label
+          url: https://solscan.io/account/2ojv9BAiHUrvsm9gxDe7fJSzbNZSJcxZvf8dqmWGHG8S
+    - chain: solana
+      address: 9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM
+      entity: binance_cex
+      label: Binance SOL hot wallet 3
+      role: hot_wallet
+      status: candidate
+      evidence:
+        - kind: label
+          url: https://solscan.io/account/9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM
+    - chain: solana
+      address: 3yFwqXBfZY4jBVUafQ1YEXw189y2dN3V5KQq9uzBDy1E
+      entity: binance_cex
+      label: Binance SOL hot wallet 4
+      role: hot_wallet
+      status: candidate
+      evidence:
+        - kind: label
+          url: https://solscan.io/account/3yFwqXBfZY4jBVUafQ1YEXw189y2dN3V5KQq9uzBDy1E
+    - chain: solana
+      address: 3gd3dqgtJ4jWfBfLYTX67DALFetjc5iS72sCgRhCkW2u
+      entity: binance_cex
+      label: Binance SOL hot wallet 5
+      role: hot_wallet
+      status: candidate
+      evidence:
+        - kind: label
+          url: https://solscan.io/account/3gd3dqgtJ4jWfBfLYTX67DALFetjc5iS72sCgRhCkW2u
+    - chain: solana
+      address: 6QJzieMYfp7yr3EdrePaQoG3Ghxs2wM98xSLRu8Xh56U
+      entity: binance_cex
+      label: Binance SOL hot wallet 6
+      role: hot_wallet
+      status: candidate
+      evidence:
+        - kind: label
+          url: https://solscan.io/account/6QJzieMYfp7yr3EdrePaQoG3Ghxs2wM98xSLRu8Xh56U
+    - chain: solana
+      address: 9Rycov3U4efJf5HiqZYGjN7qJJHEtMsj4vbmkG4xfCxk
+      entity: fireblocks_custody
+      label: Fireblocks SOL custody
+      role: custody
+      status: candidate
+      evidence:
+        - kind: label
+          url: https://solscan.io/account/9Rycov3U4efJf5HiqZYGjN7qJJHEtMsj4vbmkG4xfCxk
+    - chain: ethereum
+      address: "0xAC3E216bD55860912062a4027A03b99587B7FfC7"
+      entity: unlabeled_whale
+      label: Unlabeled whale / ETH 1
+      role: whale
+      status: candidate
+      evidence:
+        - kind: label
+          url: https://etherscan.io/address/0xAC3E216bD55860912062a4027A03b99587B7FfC7
+    - chain: bsc
+      address: "0xAC3E216bD55860912062a4027A03b99587B7FfC7"
+      entity: unlabeled_whale
+      label: Unlabeled whale / BSC 1
+      role: whale
+      status: candidate
+      evidence:
+        - kind: label
+          url: https://bscscan.com/address/0xAC3E216bD55860912062a4027A03b99587B7FfC7
+    - chain: ethereum
+      address: "0x041c32c919de3e85e0D89984c2590434f6569dFA"
+      entity: unlabeled_whale
+      label: Unlabeled whale / ETH 2
+      role: whale
+      status: candidate
+      evidence:
+        - kind: label
+          url: https://etherscan.io/address/0x041c32c919de3e85e0D89984c2590434f6569dFA
+    - chain: bsc
+      address: "0x041c32c919de3e85e0D89984c2590434f6569dFA"
+      entity: unlabeled_whale
+      label: Unlabeled whale / BSC 2
+      role: whale
+      status: candidate
+      evidence:
+        - kind: label
+          url: https://bscscan.com/address/0x041c32c919de3e85e0D89984c2590434f6569dFA
+redemption:
+  status_url: https://status.bitgo.com/api/v2/summary.json
+  status_interval_seconds: 300
+  page_interval_seconds: 3600
+  recovery_checks: 2
+  official_page_urls:
+    - https://www.bitgo.com/usd1/
+    - https://www.bitgo.com/usd1-terms/
+    - https://investors.bitgo.com/news/default.aspx
+    - https://docs.worldlibertyfinancial.com/resources/faq
+  media_rss_urls: []
 por:
   address: "0x691b74146cdba162449012aa32d3cbf5df77d4c4"
   interval_seconds: 300
