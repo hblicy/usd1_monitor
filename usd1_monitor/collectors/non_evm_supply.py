@@ -47,6 +47,18 @@ class RpcClient(Protocol):
     async def call(self, method: str, params: list) -> object: ...
 
 
+def _parse_uint(value: object, error: str) -> int:
+    if isinstance(value, bool):
+        raise SupplyDataError(error)
+    if isinstance(value, int):
+        if value < 0:
+            raise SupplyDataError(error)
+        return value
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    raise SupplyDataError(error)
+
+
 async def _post_with_fallback(
     http: JsonPoster,
     urls: tuple[str, ...],
@@ -285,21 +297,17 @@ class AptosSupplyCollector:
                 raise SupplyDataError(
                     "Aptos USD1 metadata identity mismatch"
                 )
-            raw_supply = row.get("supply_v2")
-            if (
-                not isinstance(raw_supply, str)
-                or not raw_supply.isdigit()
-            ):
-                raise SupplyDataError(
-                    "Aptos USD1 supply_v2 is malformed"
-                )
+            raw_supply = _parse_uint(
+                row.get("supply_v2"),
+                "Aptos USD1 supply_v2 is malformed",
+            )
             snapshots.append(
                 _snapshot(
                     "native_aptos",
                     "supply.native",
                     "aptos_indexer",
                     "aptos",
-                    int(raw_supply),
+                    raw_supply,
                     6,
                     collected_at,
                     APTOS_EXPLORER,

@@ -203,6 +203,35 @@ async def test_aptos_reads_supply_and_pool_in_one_graphql_response() -> None:
 
 
 @pytest.mark.asyncio
+async def test_aptos_accepts_integer_supply_v2() -> None:
+    http = FakeHttp()
+    url = "https://aptos.example/v1/graphql"
+    body = aptos_response(
+        supply="4200000000000", balance="1250000000000"
+    )
+    body["data"]["fungible_asset_metadata"][0]["supply_v2"] = 16211958179163
+    http.queue_json(url, body, method="POST")
+
+    batch = await AptosSupplyCollector(http, [url]).collect(NOW)
+
+    assert batch.errors == ()
+    assert batch.snapshots[0].supply == pytest.approx(16_211_958.179163)
+
+
+@pytest.mark.asyncio
+async def test_aptos_rejects_boolean_supply_v2() -> None:
+    http = FakeHttp()
+    url = "https://aptos.example/v1/graphql"
+    body = aptos_response(supply="1", balance="0")
+    body["data"]["fungible_asset_metadata"][0]["supply_v2"] = True
+    http.queue_json(url, body, method="POST")
+
+    batch = await AptosSupplyCollector(http, [url]).collect(NOW)
+
+    assert [item[0] for item in batch.errors] == ["native_aptos"]
+
+
+@pytest.mark.asyncio
 async def test_aptos_duplicate_metadata_preserves_valid_pool_balance() -> None:
     http = FakeHttp()
     url = "https://aptos.example/v1/graphql"
