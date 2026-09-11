@@ -1,22 +1,45 @@
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
 from tests.fakes import FakeRpc
+from usd1_monitor.collectors import custody as custody_module
 from usd1_monitor.collectors.custody import (
     SOLANA_USD1_MINT,
     CustodyBalanceCollector,
     CustodyDataError,
 )
 from usd1_monitor.config import CustodyAddressConfig, CustodyConfig
+from usd1_monitor.models import ChainEvent
 
 
 NOW = datetime(2026, 9, 11, 4, tzinfo=UTC)
 EVM_ONE = "0x" + "11" * 20
 EVM_TWO = "0x" + "22" * 20
 SOLANA_OWNER = "5tzFkiKscXHK5ZXCGbXZxdw7gTjjD1mBwuoFbhUvuAi9"
+
+
+def _transfer_event(
+    block_number: int,
+    *,
+    log_index: int = 0,
+    sender: str = EVM_ONE,
+) -> ChainEvent:
+    return ChainEvent(
+        "ethereum",
+        block_number,
+        f"0x{block_number:062x}{log_index:02x}",
+        log_index,
+        "TRANSFER",
+        {
+            "from_address": sender,
+            "to_address": EVM_TWO,
+            "amount": 1.0,
+        },
+        NOW,
+    )
 
 
 def _address(
@@ -690,3 +713,118 @@ async def test_effective_trusted_address_must_be_in_collected_chain() -> None:
             NOW,
             trusted_addresses=[bsc],
         )
+
+
+@pytest.mark.asyncio
+async def test_timestamp_enrichment_fetches_each_relevant_block_once(
+    storage,
+) -> None:
+    rpc = FakeRpc()
+    rpc.result(
+        "eth_getBlockByNumber",
+        {"number": hex(90), "timestamp": hex(int(NOW.timestamp()))},
+    )
+    await storage.insert_chain_events_and_cursor(
+        "ethereum",
+        [
+            _transfer_event(89),
+            _transfer_event(90, log_index=0),
+            _transfer_event(90, log_index=1),
+            _transfer_event(91, sender="0x" + "33" * 20),
+        ],
+        91,
+    )
+
+    await custody_module.enrich_transfer_timestamps(
+        "ethereum", rpc, storage, {EVM_ONE}, min_block=90
+    )
+
+    assert rpc.calls_for("eth_getBlockByNumber") == [["0x5a", False]]
+    events = await storage.custody_transfers_since(
+        "ethereum", NOW - timedelta(hours=1), {EVM_ONE}
+    )
+    assert len(events) == 2
+    assert all(item.payload["block_time"] == NOW.isoformat() for item in events)
+    assert await storage.unstamped_transfer_blocks(
+        "ethereum", {EVM_ONE}, min_block=90
+    ) == []
+
+    await custody_module.enrich_transfer_timestamps(
+        "ethereum", rpc, storage, {EVM_ONE}, min_block=90
+    )
+    assert len(rpc.calls_for("eth_getBlockByNumber")) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("response", "detail"),
+    [
+        (None, "response"),
+        ([], "response"),
+        ({}, "number"),
+        ({"number": hex(91), "timestamp": "0x1"}, "number"),
+        ({"number": hex(90), "timestamp": True}, "timestamp"),
+        ({"number": hex(90), "timestamp": -1}, "timestamp"),
+        ({"number": hex(90), "timestamp": "-0x1"}, "timestamp"),
+        ({"number": hex(90), "timestamp": "0x"}, "timestamp"),
+    ],
+)
+async def test_timestamp_enrichment_rejects_malformed_block_response(
+    storage, response: object, detail: str
+) -> None:
+    rpc = FakeRpc()
+    rpc.result("eth_getBlockByNumber", response)
+    await storage.insert_chain_events_and_cursor(
+        "ethereum", [_transfer_event(90)], 90
+    )
+
+    with pytest.raises(
+        CustodyDataError,
+        match=rf"ethereum.*90.*eth_getBlockByNumber.*{detail}",
+    ):
+        await custody_module.enrich_transfer_timestamps(
+            "ethereum", rpc, storage, {EVM_ONE}, min_block=90
+        )
+
+    assert await storage.unstamped_transfer_blocks(
+        "ethereum", {EVM_ONE}, min_block=90
+    ) == [90]
+
+
+@pytest.mark.asyncio
+async def test_timestamp_enrichment_preserves_unstamped_event_on_rpc_failure(
+    storage,
+) -> None:
+    rpc = FakeRpc()
+    rpc.result("eth_getBlockByNumber", RuntimeError("offline"))
+    await storage.insert_chain_events_and_cursor(
+        "bsc",
+        [
+            ChainEvent(
+                "bsc",
+                100,
+                "0xtx",
+                0,
+                "TRANSFER",
+                {
+                    "from_address": EVM_ONE,
+                    "to_address": EVM_TWO,
+                    "amount": 1.0,
+                },
+                NOW,
+            )
+        ],
+        100,
+    )
+
+    with pytest.raises(
+        CustodyDataError,
+        match="bsc.*100.*eth_getBlockByNumber.*offline",
+    ):
+        await custody_module.enrich_transfer_timestamps(
+            "bsc", rpc, storage, {EVM_ONE}, min_block=100
+        )
+
+    assert await storage.unstamped_transfer_blocks(
+        "bsc", {EVM_ONE}, min_block=100
+    ) == [100]

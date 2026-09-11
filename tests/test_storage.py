@@ -1,4 +1,5 @@
 import asyncio
+import json
 import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -14,6 +15,38 @@ from usd1_monitor.models import (
     RuleEvaluation,
 )
 from usd1_monitor.storage import Storage
+
+
+TRANSFER_FROM = "0x" + "aa" * 20
+TRANSFER_TO = "0x" + "bb" * 20
+
+
+def _transfer_event(
+    chain: str,
+    block_number: int,
+    sender: str = TRANSFER_FROM,
+    receiver: str = TRANSFER_TO,
+    *,
+    log_index: int = 0,
+    event_type: str = "TRANSFER",
+    payload_extra: dict[str, object] | None = None,
+) -> ChainEvent:
+    payload: dict[str, object] = {
+        "from_address": sender,
+        "to_address": receiver,
+        "amount": 1.0,
+    }
+    if payload_extra:
+        payload.update(payload_extra)
+    return ChainEvent(
+        chain,
+        block_number,
+        f"0x{block_number:062x}{log_index:02x}",
+        log_index,
+        event_type,
+        payload,
+        datetime(2026, 9, 11, tzinfo=UTC),
+    )
 
 
 @pytest.mark.asyncio
@@ -556,3 +589,175 @@ async def test_reorg_cancels_legacy_reorg_snapshot_alert_by_content_chain(
     assert remaining == {
         "reorg-snapshot:100:paused:2026-09-08T00:01:00+00:00"
     }
+
+
+@pytest.mark.asyncio
+async def test_unstamped_transfer_blocks_only_include_relevant_new_blocks(
+    storage,
+) -> None:
+    events = [
+        _transfer_event("ethereum", 89),
+        _transfer_event("ethereum", 90, TRANSFER_FROM.upper(), log_index=0),
+        _transfer_event(
+            "ethereum", 90, TRANSFER_FROM, "0x" + "cc" * 20, log_index=1
+        ),
+        _transfer_event(
+            "ethereum", 91, "0x" + "11" * 20, "0x" + "22" * 20
+        ),
+        _transfer_event("ethereum", 92, event_type="MINT"),
+        _transfer_event(
+            "ethereum",
+            93,
+            payload_extra={"block_time": "2026-09-11T00:00:00+00:00"},
+        ),
+        _transfer_event("bsc", 94),
+    ]
+    await storage.insert_chain_events_and_cursor("ethereum", events, 94)
+
+    assert await storage.unstamped_transfer_blocks(
+        "ethereum", {TRANSFER_FROM}, min_block=90
+    ) == [90]
+    assert await storage.unstamped_transfer_blocks(
+        "ethereum", set(), min_block=0
+    ) == []
+
+
+@pytest.mark.asyncio
+async def test_transfer_address_is_bound_as_sql_value(storage) -> None:
+    await storage.insert_chain_events_and_cursor(
+        "ethereum", [_transfer_event("ethereum", 100)], 100
+    )
+
+    injection = "0x') OR 1=1 --"
+    assert await storage.unstamped_transfer_blocks(
+        "ethereum", {injection}, min_block=0
+    ) == []
+    assert await storage.custody_transfers_since(
+        "ethereum", datetime(2026, 1, 1, tzinfo=UTC), {injection}
+    ) == []
+    assert await storage.count_chain_events() == 1
+
+
+@pytest.mark.asyncio
+async def test_set_transfer_block_time_is_atomic_scoped_and_idempotent(
+    storage,
+) -> None:
+    original = [
+        _transfer_event(
+            "ethereum", 100, log_index=0, payload_extra={"note": "keep"}
+        ),
+        _transfer_event("ethereum", 100, log_index=1, event_type="MINT"),
+        _transfer_event("bsc", 100, log_index=2),
+    ]
+    await storage.insert_chain_events_and_cursor("ethereum", original, 100)
+    local_time = datetime.fromisoformat("2026-09-11T08:00:00+08:00")
+
+    await storage.set_transfer_block_time("ethereum", 100, local_time)
+    await storage.set_transfer_block_time("ethereum", 100, local_time)
+
+    ethereum = await storage.chain_events_for_chain("ethereum")
+    assert ethereum[0].event_type == "MINT"
+    assert "block_time" not in ethereum[0].payload
+    assert ethereum[1].payload == {
+        "amount": 1.0,
+        "block_time": "2026-09-11T00:00:00+00:00",
+        "from_address": TRANSFER_FROM,
+        "note": "keep",
+        "to_address": TRANSFER_TO,
+    }
+    bsc = await storage.chain_events_for_chain("bsc")
+    assert "block_time" not in bsc[0].payload
+
+
+@pytest.mark.asyncio
+async def test_custody_transfers_since_uses_utc_boundary_and_stable_order(
+    storage,
+) -> None:
+    await storage.insert_chain_events_and_cursor(
+        "ethereum",
+        [
+            _transfer_event("ethereum", 102, log_index=2),
+            _transfer_event("ethereum", 101, log_index=1),
+            _transfer_event("ethereum", 100, log_index=0),
+            _transfer_event(
+                "ethereum",
+                103,
+                "0x" + "11" * 20,
+                "0x" + "22" * 20,
+            ),
+        ],
+        103,
+    )
+    await storage.set_transfer_block_time(
+        "ethereum", 100, datetime.fromisoformat("2026-09-11T07:59:59+08:00")
+    )
+    await storage.set_transfer_block_time(
+        "ethereum", 101, datetime.fromisoformat("2026-09-11T08:00:00+08:00")
+    )
+    await storage.set_transfer_block_time(
+        "ethereum", 102, datetime.fromisoformat("2026-09-11T00:00:01+00:00")
+    )
+
+    events = await storage.custody_transfers_since(
+        "ethereum",
+        datetime.fromisoformat("2026-09-11T08:00:00+08:00"),
+        {TRANSFER_FROM.upper()},
+    )
+
+    assert [(item.block_number, item.log_index) for item in events] == [
+        (101, 1),
+        (102, 2),
+    ]
+    assert all("block_time" in item.payload for item in events)
+    assert await storage.custody_transfers_since(
+        "ethereum", datetime(2026, 1, 1, tzinfo=UTC), set()
+    ) == []
+
+
+@pytest.mark.asyncio
+async def test_transfer_time_methods_reject_naive_datetimes(storage) -> None:
+    with pytest.raises(ValueError, match="timezone-aware"):
+        await storage.set_transfer_block_time(
+            "ethereum", 1, datetime(2026, 9, 11)
+        )
+    with pytest.raises(ValueError, match="timezone-aware"):
+        await storage.custody_transfers_since(
+            "ethereum", datetime(2026, 9, 11), {TRANSFER_FROM}
+        )
+
+
+@pytest.mark.asyncio
+async def test_set_transfer_block_time_rolls_back_malformed_json(storage) -> None:
+    await storage.insert_chain_events_and_cursor(
+        "ethereum", [_transfer_event("ethereum", 110)], 110
+    )
+    await storage.connection.execute(
+        """
+        INSERT INTO chain_events (
+            chain, block_number, tx_hash, log_index, event_type,
+            payload_json, observed_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "ethereum",
+            110,
+            "0xmalformed",
+            1,
+            "TRANSFER",
+            "{not-json",
+            datetime(2026, 9, 11, tzinfo=UTC).isoformat(),
+        ),
+    )
+    await storage.connection.commit()
+
+    with pytest.raises(ValueError, match="ethereum.*110.*0xmalformed"):
+        await storage.set_transfer_block_time(
+            "ethereum", 110, datetime(2026, 9, 11, tzinfo=UTC)
+        )
+
+    cursor = await storage.connection.execute(
+        "SELECT payload_json FROM chain_events WHERE tx_hash != '0xmalformed'"
+    )
+    row = await cursor.fetchone()
+    await cursor.close()
+    assert json.loads(row["payload_json"]).get("block_time") is None

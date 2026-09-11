@@ -3,12 +3,14 @@ from __future__ import annotations
 import asyncio
 import math
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Protocol, Sequence
 
 from usd1_monitor.config import CustodyAddressConfig, USD1_TOKEN_ADDRESS
 from usd1_monitor.models import Observation
+from usd1_monitor.storage import Storage
 
 
 BALANCE_OF_SELECTOR = "0x70a08231"
@@ -127,6 +129,66 @@ def _parse_evm_balance(value: object, chain: str, address: str) -> int:
             f"{chain} custody address {address} balanceOf result is malformed"
         )
     return int(value, 16)
+
+
+async def enrich_transfer_timestamps(
+    chain: str,
+    rpc: RpcClient,
+    storage: Storage,
+    addresses: set[str],
+    *,
+    min_block: int,
+) -> None:
+    blocks = await storage.unstamped_transfer_blocks(
+        chain, addresses, min_block=min_block
+    )
+    method = "eth_getBlockByNumber"
+    for block_number in blocks:
+        try:
+            body = await rpc.call(method, [hex(block_number), False])
+        except Exception as exc:
+            raise CustodyDataError(
+                f"{chain} block {block_number} {method} failed: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
+        if not isinstance(body, Mapping):
+            raise CustodyDataError(
+                f"{chain} block {block_number} {method} response is malformed"
+            )
+        raw_number = body.get("number")
+        if (
+            not isinstance(raw_number, str)
+            or _HEX_QUANTITY.fullmatch(raw_number) is None
+            or int(raw_number, 16) != block_number
+        ):
+            raise CustodyDataError(
+                f"{chain} block {block_number} {method} number is malformed "
+                "or mismatched"
+            )
+        raw_timestamp = body.get("timestamp")
+        if (
+            not isinstance(raw_timestamp, str)
+            or _HEX_QUANTITY.fullmatch(raw_timestamp) is None
+        ):
+            raise CustodyDataError(
+                f"{chain} block {block_number} {method} timestamp is malformed"
+            )
+        try:
+            block_time = datetime.fromtimestamp(int(raw_timestamp, 16), tz=UTC)
+        except (OverflowError, OSError, ValueError) as exc:
+            raise CustodyDataError(
+                f"{chain} block {block_number} {method} timestamp is malformed: "
+                f"{exc}"
+            ) from exc
+        try:
+            await storage.set_transfer_block_time(
+                chain, block_number, block_time
+            )
+        except Exception as exc:
+            raise CustodyDataError(
+                f"{chain} block {block_number} {method} timestamp persistence "
+                f"failed: {type(exc).__name__}: {exc}"
+            ) from exc
 
 
 def _parse_solana_accounts(value: object, owner: str) -> tuple[int, int, int]:

@@ -1082,6 +1082,122 @@ class Storage:
         await cursor.close()
         return [self._chain_event_from_row(row) for row in rows]
 
+    async def unstamped_transfer_blocks(
+        self,
+        chain: str,
+        addresses: set[str],
+        *,
+        min_block: int,
+    ) -> list[int]:
+        if not addresses:
+            return []
+        values = tuple(sorted({item.casefold() for item in addresses}))
+        placeholders = ", ".join("?" for _ in values)
+        cursor = await self.connection.execute(
+            f"""
+            SELECT DISTINCT block_number
+            FROM chain_events
+            WHERE chain = ?
+              AND event_type = 'TRANSFER'
+              AND block_number >= ?
+              AND json_extract(payload_json, '$.block_time') IS NULL
+              AND (
+                  lower(json_extract(payload_json, '$.from_address'))
+                      IN ({placeholders})
+                  OR lower(json_extract(payload_json, '$.to_address'))
+                      IN ({placeholders})
+              )
+            ORDER BY block_number
+            """,
+            (chain, min_block, *values, *values),
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+        return [int(row["block_number"]) for row in rows]
+
+    async def custody_transfers_since(
+        self,
+        chain: str,
+        since: datetime,
+        addresses: set[str],
+    ) -> list[ChainEvent]:
+        if since.tzinfo is None or since.utcoffset() is None:
+            raise ValueError("since must be timezone-aware")
+        if not addresses:
+            return []
+        since_utc = since.astimezone(UTC).isoformat()
+        values = tuple(sorted({item.casefold() for item in addresses}))
+        placeholders = ", ".join("?" for _ in values)
+        cursor = await self.connection.execute(
+            f"""
+            SELECT chain, block_number, tx_hash, log_index, event_type,
+                   payload_json, observed_at
+            FROM chain_events
+            WHERE chain = ?
+              AND event_type = 'TRANSFER'
+              AND json_type(payload_json, '$.block_time') = 'text'
+              AND json_extract(payload_json, '$.block_time') >= ?
+              AND (
+                  lower(json_extract(payload_json, '$.from_address'))
+                      IN ({placeholders})
+                  OR lower(json_extract(payload_json, '$.to_address'))
+                      IN ({placeholders})
+              )
+            ORDER BY block_number, log_index, id
+            """,
+            (chain, since_utc, *values, *values),
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+        return [self._chain_event_from_row(row) for row in rows]
+
+    @serialized_write
+    async def set_transfer_block_time(
+        self,
+        chain: str,
+        block_number: int,
+        block_time: datetime,
+    ) -> None:
+        if block_time.tzinfo is None or block_time.utcoffset() is None:
+            raise ValueError("block_time must be timezone-aware")
+        block_time_iso = block_time.astimezone(UTC).isoformat()
+        await self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            cursor = await self.connection.execute(
+                """
+                SELECT id, tx_hash, payload_json
+                FROM chain_events
+                WHERE chain = ? AND block_number = ?
+                  AND event_type = 'TRANSFER'
+                ORDER BY id
+                """,
+                (chain, block_number),
+            )
+            rows = await cursor.fetchall()
+            await cursor.close()
+            updates: list[tuple[str, int]] = []
+            for row in rows:
+                try:
+                    payload = json.loads(row["payload_json"])
+                    if not isinstance(payload, dict):
+                        raise TypeError("payload must be a JSON object")
+                except (json.JSONDecodeError, TypeError) as exc:
+                    raise ValueError(
+                        f"malformed Transfer payload for {chain} block "
+                        f"{block_number} tx {row['tx_hash']}: {exc}"
+                    ) from exc
+                payload["block_time"] = block_time_iso
+                updates.append((json.dumps(payload, sort_keys=True), row["id"]))
+            if updates:
+                await self.connection.executemany(
+                    "UPDATE chain_events SET payload_json = ? WHERE id = ?",
+                    updates,
+                )
+            await self.connection.commit()
+        except BaseException:
+            await self.connection.rollback()
+            raise
+
     async def delete_evm_observations_from_uncommitted(
         self, chain: str, block_number: int
     ) -> None:
