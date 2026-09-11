@@ -87,8 +87,13 @@ class StateEngine:
         if not enqueue_alerts:
             return transitions
 
+        alertable_transitions = [
+            transition
+            for transition in transitions
+            if not is_monitoring_health_rule(transition.rule_id)
+        ]
         groups: dict[str, list[RiskTransition]] = defaultdict(list)
-        for index, transition in enumerate(transitions):
+        for index, transition in enumerate(alertable_transitions):
             group_key = transition.cause_id or f"rule:{index}:{transition.rule_id}"
             groups[group_key].append(transition)
         states = await self._storage.list_risk_states()

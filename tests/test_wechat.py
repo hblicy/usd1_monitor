@@ -446,19 +446,55 @@ async def test_recovery_alert_uses_complete_persisted_overall_state(storage) -> 
 
 
 @pytest.mark.asyncio
-async def test_health_alert_uses_monitor_health_not_business_overall(storage) -> None:
+async def test_health_transitions_are_persisted_without_wechat_alerts(storage) -> None:
     await StateEngine(storage).apply(
-        [RuleEvaluation("health.por", RiskLevel.RED)], NOW
+        [
+            RuleEvaluation("health.por", RiskLevel.RED),
+            RuleEvaluation("por.age", RiskLevel.YELLOW),
+        ],
+        NOW,
     )
 
-    pending = await storage.pending_alerts()
-
-    assert pending[0].content.startswith("🔴 USD1 监控异常")
-    assert "USD1 危险" not in pending[0].content
+    assert await storage.pending_alerts() == []
+    por_state = await storage.get_risk_state("health.por")
+    age_state = await storage.get_risk_state("por.age")
+    assert por_state is not None and por_state.level is RiskLevel.RED
+    assert age_state is not None and age_state.level is RiskLevel.YELLOW
 
 
 @pytest.mark.asyncio
-async def test_por_age_alert_uses_own_level_when_health_overall_is_red(
+async def test_mixed_transitions_only_enqueue_business_alerts(storage) -> None:
+    await StateEngine(storage).apply(
+        [
+            RuleEvaluation("health.por", RiskLevel.RED),
+            RuleEvaluation("market.price", RiskLevel.YELLOW),
+        ],
+        NOW,
+    )
+
+    pending = await storage.pending_alerts()
+    assert len(pending) == 1
+    assert pending[0].content.startswith("🟡 USD1 注意")
+    assert "监控异常" not in pending[0].content
+    health_state = await storage.get_risk_state("health.por")
+    assert health_state is not None and health_state.level is RiskLevel.RED
+
+
+@pytest.mark.asyncio
+async def test_health_recovery_is_persisted_without_wechat_alert(storage) -> None:
+    await storage.set_risk_state("health.por", RiskLevel.RED, NOW, NOW)
+
+    await StateEngine(storage).apply(
+        [RuleEvaluation("health.por", RiskLevel.GREEN)], NOW
+    )
+
+    assert await storage.pending_alerts() == []
+    health_state = await storage.get_risk_state("health.por")
+    assert health_state is not None and health_state.level is RiskLevel.GREEN
+
+
+@pytest.mark.asyncio
+async def test_por_age_transition_is_persisted_without_wechat_alert(
     storage,
 ) -> None:
     await storage.set_risk_state("market.price", RiskLevel.GREEN, NOW, NOW)
@@ -468,10 +504,9 @@ async def test_por_age_alert_uses_own_level_when_health_overall_is_red(
         [RuleEvaluation("por.age", RiskLevel.YELLOW)], NOW
     )
 
-    pending = await storage.pending_alerts()
-
-    assert pending[0].content.startswith("🟡 USD1 储备数据更新延迟")
-    assert "USD1 危险" not in pending[0].content
+    assert await storage.pending_alerts() == []
+    age_state = await storage.get_risk_state("por.age")
+    assert age_state is not None and age_state.level is RiskLevel.YELLOW
 
 
 @pytest.mark.asyncio
@@ -497,7 +532,7 @@ async def test_alert_times_use_configured_timezone(tmp_path) -> None:
 @pytest.mark.asyncio
 async def test_state_engine_splits_alerts_at_wechat_utf8_limit(storage) -> None:
     evaluation = RuleEvaluation(
-        "health.official_wlfi",
+        "market.price",
         RiskLevel.RED,
         {"source_url": "https://example.com/" + "a" * 5000},
         cause_id="oversized-alert",
