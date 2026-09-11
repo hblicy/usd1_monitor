@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from usd1_monitor import storage as storage_module
 from usd1_monitor.engine.state import StateEngine
 from usd1_monitor.models import (
     Announcement,
@@ -727,9 +728,11 @@ async def test_transfer_time_methods_reject_naive_datetimes(storage) -> None:
 
 
 @pytest.mark.asyncio
-async def test_set_transfer_block_time_rolls_back_malformed_json(storage) -> None:
-    await storage.insert_chain_events_and_cursor(
-        "ethereum", [_transfer_event("ethereum", 110)], 110
+async def test_transfer_queries_report_malformed_json_with_event_context(
+    storage,
+) -> None:
+    malformed = (
+        '{"from_address":"' + TRANSFER_FROM + '","block_time":'
     )
     await storage.connection.execute(
         """
@@ -742,22 +745,97 @@ async def test_set_transfer_block_time_rolls_back_malformed_json(storage) -> Non
             "ethereum",
             110,
             "0xmalformed",
-            1,
+            7,
             "TRANSFER",
-            "{not-json",
+            malformed,
             datetime(2026, 9, 11, tzinfo=UTC).isoformat(),
         ),
     )
     await storage.connection.commit()
 
-    with pytest.raises(ValueError, match="ethereum.*110.*0xmalformed"):
+    with pytest.raises(
+        storage_module.StorageError,
+        match="ethereum.*110.*0xmalformed.*7.*payload JSON",
+    ):
+        await storage.unstamped_transfer_blocks(
+            "ethereum", {TRANSFER_FROM}, min_block=100
+        )
+    with pytest.raises(
+        storage_module.StorageError,
+        match="ethereum.*110.*0xmalformed.*7.*payload JSON",
+    ):
+        await storage.custody_transfers_since(
+            "ethereum", datetime(2026, 1, 1, tzinfo=UTC), {TRANSFER_FROM}
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("block_time", [123, True, "not-an-instant"])
+async def test_invalid_transfer_block_time_is_requeued_but_not_queried(
+    storage, block_time: object
+) -> None:
+    await storage.insert_chain_events_and_cursor(
+        "ethereum",
+        [
+            _transfer_event(
+                "ethereum", 109, payload_extra={"block_time": block_time}
+            )
+        ],
+        109,
+    )
+
+    assert await storage.unstamped_transfer_blocks(
+        "ethereum", {TRANSFER_FROM}, min_block=100
+    ) == [109]
+    with pytest.raises(
+        storage_module.StorageError, match="ethereum.*109.*block_time"
+    ):
+        await storage.custody_transfers_since(
+            "ethereum", datetime(2026, 1, 1, tzinfo=UTC), {TRANSFER_FROM}
+        )
+
+
+@pytest.mark.asyncio
+async def test_set_transfer_block_time_rolls_back_mid_update(storage) -> None:
+    await storage.insert_chain_events_and_cursor(
+        "ethereum",
+        [
+            _transfer_event("ethereum", 110, log_index=0),
+            _transfer_event("ethereum", 110, log_index=1),
+        ],
+        110,
+    )
+    await storage.connection.execute(
+        """
+        CREATE TEMP TRIGGER fail_second_transfer_update
+        BEFORE UPDATE OF payload_json ON chain_events
+        WHEN OLD.chain = 'ethereum'
+          AND OLD.block_number = 110
+          AND OLD.log_index = 1
+        BEGIN
+            SELECT RAISE(ABORT, 'forced second update failure');
+        END
+        """,
+    )
+    await storage.connection.commit()
+
+    with pytest.raises(sqlite3.DatabaseError, match="second update failure"):
         await storage.set_transfer_block_time(
             "ethereum", 110, datetime(2026, 9, 11, tzinfo=UTC)
         )
 
-    cursor = await storage.connection.execute(
-        "SELECT payload_json FROM chain_events WHERE tx_hash != '0xmalformed'"
-    )
-    row = await cursor.fetchone()
-    await cursor.close()
-    assert json.loads(row["payload_json"]).get("block_time") is None
+    reader = sqlite3.connect(storage.path)
+    try:
+        payloads = [
+            json.loads(row[0])
+            for row in reader.execute(
+                """
+                SELECT payload_json FROM chain_events
+                WHERE chain = 'ethereum' AND block_number = 110
+                ORDER BY log_index
+                """
+            ).fetchall()
+        ]
+    finally:
+        reader.close()
+    assert [item.get("block_time") for item in payloads] == [None, None]

@@ -110,6 +110,23 @@ CREATE TABLE IF NOT EXISTS chain_block_hashes (
 """
 
 
+class StorageError(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        chain: str,
+        block_number: int,
+        tx_hash: str,
+        log_index: int,
+    ) -> None:
+        super().__init__(message)
+        self.chain = chain
+        self.block_number = block_number
+        self.tx_hash = tx_hash
+        self.log_index = log_index
+
+
 def serialized_write(method):
     @functools.wraps(method)
     async def wrapper(self, *args, **kwargs):
@@ -1091,29 +1108,18 @@ class Storage:
     ) -> list[int]:
         if not addresses:
             return []
-        values = tuple(sorted({item.casefold() for item in addresses}))
-        placeholders = ", ".join("?" for _ in values)
-        cursor = await self.connection.execute(
-            f"""
-            SELECT DISTINCT block_number
-            FROM chain_events
-            WHERE chain = ?
-              AND event_type = 'TRANSFER'
-              AND block_number >= ?
-              AND json_extract(payload_json, '$.block_time') IS NULL
-              AND (
-                  lower(json_extract(payload_json, '$.from_address'))
-                      IN ({placeholders})
-                  OR lower(json_extract(payload_json, '$.to_address'))
-                      IN ({placeholders})
-              )
-            ORDER BY block_number
-            """,
-            (chain, min_block, *values, *values),
+        rows = await self._relevant_transfer_rows(
+            chain, addresses, min_block=min_block
         )
-        rows = await cursor.fetchall()
-        await cursor.close()
-        return [int(row["block_number"]) for row in rows]
+        blocks: set[int] = set()
+        for row in rows:
+            try:
+                block_time = self._transfer_block_time(row)
+            except StorageError:
+                block_time = None
+            if block_time is None:
+                blocks.add(int(row["block_number"]))
+        return sorted(blocks)
 
     async def custody_transfers_since(
         self,
@@ -1125,31 +1131,129 @@ class Storage:
             raise ValueError("since must be timezone-aware")
         if not addresses:
             return []
-        since_utc = since.astimezone(UTC).isoformat()
+        since_utc = since.astimezone(UTC)
+        rows = await self._relevant_transfer_rows(chain, addresses)
+        events: list[ChainEvent] = []
+        for row in rows:
+            block_time = self._transfer_block_time(row)
+            if block_time is not None and block_time >= since_utc:
+                events.append(self._chain_event_from_row(row))
+        return events
+
+    async def _relevant_transfer_rows(
+        self,
+        chain: str,
+        addresses: set[str],
+        *,
+        min_block: int | None = None,
+    ) -> list[aiosqlite.Row]:
         values = tuple(sorted({item.casefold() for item in addresses}))
         placeholders = ", ".join("?" for _ in values)
+        block_filter = ""
+        scope_params: tuple[object, ...] = (chain,)
+        if min_block is not None:
+            block_filter = " AND block_number >= ?"
+            scope_params = (chain, min_block)
+
+        cursor = await self.connection.execute(
+            f"""
+            SELECT chain, block_number, tx_hash, log_index, payload_json
+            FROM chain_events
+            WHERE chain = ? AND event_type = 'TRANSFER'{block_filter}
+              AND (
+                  json_valid(payload_json) = 0
+                  OR json_type(
+                      CASE WHEN json_valid(payload_json)
+                           THEN payload_json ELSE '{{}}' END
+                  ) <> 'object'
+              )
+            ORDER BY block_number, log_index, id
+            LIMIT 1
+            """,
+            scope_params,
+        )
+        invalid = await cursor.fetchone()
+        await cursor.close()
+        if invalid is not None:
+            raise self._transfer_storage_error(
+                invalid, "Transfer payload JSON is invalid"
+            )
+
         cursor = await self.connection.execute(
             f"""
             SELECT chain, block_number, tx_hash, log_index, event_type,
                    payload_json, observed_at
             FROM chain_events
-            WHERE chain = ?
-              AND event_type = 'TRANSFER'
-              AND json_type(payload_json, '$.block_time') = 'text'
-              AND json_extract(payload_json, '$.block_time') >= ?
+            WHERE chain = ? AND event_type = 'TRANSFER'{block_filter}
               AND (
-                  lower(json_extract(payload_json, '$.from_address'))
+                  lower(json_extract(
+                      CASE WHEN json_valid(payload_json)
+                           THEN payload_json ELSE '{{}}' END,
+                      '$.from_address'
+                  ))
                       IN ({placeholders})
-                  OR lower(json_extract(payload_json, '$.to_address'))
+                  OR lower(json_extract(
+                      CASE WHEN json_valid(payload_json)
+                           THEN payload_json ELSE '{{}}' END,
+                      '$.to_address'
+                  ))
                       IN ({placeholders})
               )
             ORDER BY block_number, log_index, id
             """,
-            (chain, since_utc, *values, *values),
+            (*scope_params, *values, *values),
         )
         rows = await cursor.fetchall()
         await cursor.close()
-        return [self._chain_event_from_row(row) for row in rows]
+        return rows
+
+    @classmethod
+    def _transfer_block_time(cls, row: aiosqlite.Row) -> datetime | None:
+        try:
+            payload = json.loads(row["payload_json"])
+        except (json.JSONDecodeError, TypeError) as exc:
+            raise cls._transfer_storage_error(
+                row, "Transfer payload JSON is invalid"
+            ) from exc
+        if not isinstance(payload, dict):
+            raise cls._transfer_storage_error(
+                row, "Transfer payload JSON is not an object"
+            )
+        raw = payload.get("block_time")
+        if raw is None:
+            return None
+        if not isinstance(raw, str):
+            raise cls._transfer_storage_error(
+                row, "Transfer block_time is not an ISO datetime string"
+            )
+        try:
+            parsed = datetime.fromisoformat(raw)
+        except ValueError as exc:
+            raise cls._transfer_storage_error(
+                row, "Transfer block_time is not a valid ISO datetime"
+            ) from exc
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise cls._transfer_storage_error(
+                row, "Transfer block_time must be timezone-aware"
+            )
+        return parsed.astimezone(UTC)
+
+    @staticmethod
+    def _transfer_storage_error(
+        row: aiosqlite.Row, detail: str
+    ) -> StorageError:
+        chain = str(row["chain"])
+        block_number = int(row["block_number"])
+        tx_hash = str(row["tx_hash"])
+        log_index = int(row["log_index"])
+        return StorageError(
+            f"{chain} block {block_number} tx {tx_hash} log_index "
+            f"{log_index}: {detail}",
+            chain=chain,
+            block_number=block_number,
+            tx_hash=tx_hash,
+            log_index=log_index,
+        )
 
     @serialized_write
     async def set_transfer_block_time(
@@ -1165,7 +1269,8 @@ class Storage:
         try:
             cursor = await self.connection.execute(
                 """
-                SELECT id, tx_hash, payload_json
+                SELECT id, chain, block_number, tx_hash, log_index,
+                       payload_json
                 FROM chain_events
                 WHERE chain = ? AND block_number = ?
                   AND event_type = 'TRANSFER'
@@ -1182,9 +1287,8 @@ class Storage:
                     if not isinstance(payload, dict):
                         raise TypeError("payload must be a JSON object")
                 except (json.JSONDecodeError, TypeError) as exc:
-                    raise ValueError(
-                        f"malformed Transfer payload for {chain} block "
-                        f"{block_number} tx {row['tx_hash']}: {exc}"
+                    raise self._transfer_storage_error(
+                        row, "Transfer payload JSON is invalid"
                     ) from exc
                 payload["block_time"] = block_time_iso
                 updates.append((json.dumps(payload, sort_keys=True), row["id"]))

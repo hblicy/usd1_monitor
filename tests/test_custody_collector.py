@@ -763,10 +763,12 @@ async def test_timestamp_enrichment_fetches_each_relevant_block_once(
         ([], "response"),
         ({}, "number"),
         ({"number": hex(91), "timestamp": "0x1"}, "number"),
+        ({"number": hex(90), "timestamp": "0x0"}, "timestamp"),
         ({"number": hex(90), "timestamp": True}, "timestamp"),
         ({"number": hex(90), "timestamp": -1}, "timestamp"),
         ({"number": hex(90), "timestamp": "-0x1"}, "timestamp"),
         ({"number": hex(90), "timestamp": "0x"}, "timestamp"),
+        ({"number": hex(90), "timestamp": "0x1" + "0" * 100}, "timestamp"),
     ],
 )
 async def test_timestamp_enrichment_rejects_malformed_block_response(
@@ -828,3 +830,68 @@ async def test_timestamp_enrichment_preserves_unstamped_event_on_rpc_failure(
     assert await storage.unstamped_transfer_blocks(
         "bsc", {EVM_ONE}, min_block=100
     ) == [100]
+
+
+@pytest.mark.asyncio
+async def test_timestamp_enrichment_repairs_invalid_stored_block_time(
+    storage,
+) -> None:
+    rpc = FakeRpc()
+    rpc.result(
+        "eth_getBlockByNumber",
+        {"number": hex(90), "timestamp": hex(int(NOW.timestamp()))},
+    )
+    event = _transfer_event(90)
+    event.payload["block_time"] = True
+    await storage.insert_chain_events_and_cursor("ethereum", [event], 90)
+
+    await custody_module.enrich_transfer_timestamps(
+        "ethereum", rpc, storage, {EVM_ONE}, min_block=90
+    )
+
+    events = await storage.custody_transfers_since(
+        "ethereum", NOW - timedelta(minutes=1), {EVM_ONE}
+    )
+    assert [item.payload["block_time"] for item in events] == [NOW.isoformat()]
+
+
+@pytest.mark.asyncio
+async def test_timestamp_enrichment_wraps_malformed_payload_and_preserves_it(
+    storage,
+) -> None:
+    malformed = '{"from_address":"' + EVM_ONE + '","block_time":'
+    await storage.connection.execute(
+        """
+        INSERT INTO chain_events (
+            chain, block_number, tx_hash, log_index, event_type,
+            payload_json, observed_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "ethereum",
+            90,
+            "0xmalformed",
+            7,
+            "TRANSFER",
+            malformed,
+            NOW.isoformat(),
+        ),
+    )
+    await storage.connection.commit()
+    rpc = FakeRpc()
+
+    with pytest.raises(
+        CustodyDataError,
+        match="ethereum.*90.*eth_getBlockByNumber.*0xmalformed.*7",
+    ):
+        await custody_module.enrich_transfer_timestamps(
+            "ethereum", rpc, storage, {EVM_ONE}, min_block=90
+        )
+
+    cursor = await storage.connection.execute(
+        "SELECT payload_json FROM chain_events WHERE tx_hash = '0xmalformed'"
+    )
+    row = await cursor.fetchone()
+    await cursor.close()
+    assert row["payload_json"] == malformed
+    assert rpc.calls == []

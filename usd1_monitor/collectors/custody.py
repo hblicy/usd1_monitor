@@ -10,7 +10,7 @@ from typing import Protocol, Sequence
 
 from usd1_monitor.config import CustodyAddressConfig, USD1_TOKEN_ADDRESS
 from usd1_monitor.models import Observation
-from usd1_monitor.storage import Storage
+from usd1_monitor.storage import Storage, StorageError
 
 
 BALANCE_OF_SELECTOR = "0x70a08231"
@@ -139,10 +139,16 @@ async def enrich_transfer_timestamps(
     *,
     min_block: int,
 ) -> None:
-    blocks = await storage.unstamped_transfer_blocks(
-        chain, addresses, min_block=min_block
-    )
     method = "eth_getBlockByNumber"
+    try:
+        blocks = await storage.unstamped_transfer_blocks(
+            chain, addresses, min_block=min_block
+        )
+    except StorageError as exc:
+        raise CustodyDataError(
+            f"{chain} block {exc.block_number} {method} cannot select Transfer "
+            f"timestamp: tx {exc.tx_hash} log_index {exc.log_index}: {exc}"
+        ) from exc
     for block_number in blocks:
         try:
             body = await rpc.call(method, [hex(block_number), False])
@@ -173,8 +179,13 @@ async def enrich_transfer_timestamps(
             raise CustodyDataError(
                 f"{chain} block {block_number} {method} timestamp is malformed"
             )
+        timestamp = int(raw_timestamp, 16)
+        if timestamp <= 0:
+            raise CustodyDataError(
+                f"{chain} block {block_number} {method} timestamp is malformed"
+            )
         try:
-            block_time = datetime.fromtimestamp(int(raw_timestamp, 16), tz=UTC)
+            block_time = datetime.fromtimestamp(timestamp, tz=UTC)
         except (OverflowError, OSError, ValueError) as exc:
             raise CustodyDataError(
                 f"{chain} block {block_number} {method} timestamp is malformed: "
