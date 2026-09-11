@@ -447,7 +447,7 @@ async def test_recovery_alert_uses_complete_persisted_overall_state(storage) -> 
 
 @pytest.mark.asyncio
 async def test_health_transitions_are_persisted_without_wechat_alerts(storage) -> None:
-    await StateEngine(storage).apply(
+    transitions = await StateEngine(storage).apply(
         [
             RuleEvaluation("health.por", RiskLevel.RED),
             RuleEvaluation("por.age", RiskLevel.YELLOW),
@@ -455,6 +455,10 @@ async def test_health_transitions_are_persisted_without_wechat_alerts(storage) -
         NOW,
     )
 
+    assert [(item.rule_id, item.current) for item in transitions] == [
+        ("health.por", RiskLevel.RED),
+        ("por.age", RiskLevel.YELLOW),
+    ]
     assert await storage.pending_alerts() == []
     por_state = await storage.get_risk_state("health.por")
     age_state = await storage.get_risk_state("por.age")
@@ -484,10 +488,13 @@ async def test_mixed_transitions_only_enqueue_business_alerts(storage) -> None:
 async def test_health_recovery_is_persisted_without_wechat_alert(storage) -> None:
     await storage.set_risk_state("health.por", RiskLevel.RED, NOW, NOW)
 
-    await StateEngine(storage).apply(
+    transitions = await StateEngine(storage).apply(
         [RuleEvaluation("health.por", RiskLevel.GREEN)], NOW
     )
 
+    assert [(item.rule_id, item.current) for item in transitions] == [
+        ("health.por", RiskLevel.GREEN),
+    ]
     assert await storage.pending_alerts() == []
     health_state = await storage.get_risk_state("health.por")
     assert health_state is not None and health_state.level is RiskLevel.GREEN
