@@ -1,0 +1,33 @@
+{
+  "page": {"id": "bitgo", "name": "BitGo Status"},
+  "components": [
+    {"id": "stablecoins", "name": "Stablecoins", "status": "degraded_performance"},
+    {"id": "settlement", "name": "Settlement", "status": "operational"},
+    {"id": "api", "name": "API", "status": "operational"},
+    {"id": "wallets", "name": "Wallets", "status": "operational"}
+  ],
+  "incidents": [
+    {
+      "id": "stablecoin-delay",
+      "name": "Stablecoins processing delay",
+      "status": "investigating",
+      "created_at": "2026-09-11T03:00:00Z",
+      "updated_at": "2026-09-11T03:10:00Z",
+      "resolved_at": null,
+      "incident_updates": [
+        {
+          "id": "stablecoin-delay-update-1",
+          "incident_id": "stablecoin-delay",
+          "status": "investigating",
+          "body": "We are investigating processing delays.",
+          "created_at": "2026-09-11T03:10:00Z",
+          "updated_at": "2026-09-11T03:10:00Z",
+          "display_at": "2026-09-11T03:10:00Z"
+        }
+      ],
+      "components": [
+        {"id": "stablecoins", "name": "Stablecoins", "status": "degraded_performance"}
+      ]
+    }
+  ]
+}

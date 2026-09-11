@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Redemption news</title>
+    <item>
+      <title>USD1 bank settlement update</title>
+      <link>https://news.example.com/usd1-settlement</link>
+      <description>World Liberty settlement coverage.</description>
+      <pubDate>Thu, 10 Sep 2026 12:00:00 GMT</pubDate>
+    </item>
+    <item>
+      <title>Unitas USD1 redemption update</title>
+      <link>https://news.example.com/unitas-redemption</link>
+      <description>Unitas project news.</description>
+      <pubDate>Thu, 10 Sep 2026 11:00:00 GMT</pubDate>
+    </item>
+    <item>
+      <title>Unrelated stablecoin story</title>
+      <link>https://news.example.com/other</link>
+      <description>No relevant entity or redemption channel.</description>
+      <pubDate>Thu, 10 Sep 2026 10:00:00 GMT</pubDate>
+    </item>
+  </channel>
+</rss>
