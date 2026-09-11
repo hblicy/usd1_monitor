@@ -151,6 +151,27 @@ function isFreshMetric(item, generatedAt) {
   );
 }
 
+function isAvailableMetric(key, item, metrics, generatedAt) {
+  if (!item || typeof item.value !== "number") return false;
+  if (["multichain_supply", "bridged_total", "locked_total", "bridge_delta"].includes(key)) {
+    return isFreshMetric(item, generatedAt);
+  }
+  if (key === "estimated_collateralization") {
+    return (
+      isFreshMetric(item, generatedAt)
+      && isFreshMetric(metrics?.multichain_supply, generatedAt)
+      && isFreshMetric(metrics?.reserves, generatedAt)
+    );
+  }
+  if (key === "supply_change_24h") {
+    return (
+      isFreshMetric(item, generatedAt)
+      && isFreshMetric(metrics?.multichain_supply, generatedAt)
+    );
+  }
+  return true;
+}
+
 function unavailableMetricReason(key, metrics, generatedAt) {
   const completeSupplyFresh = isFreshMetric(metrics?.multichain_supply, generatedAt);
   if (["multichain_supply", "bridged_total", "locked_total", "bridge_delta"].includes(key)) {
@@ -176,7 +197,7 @@ function renderMetrics(metrics, generatedAt) {
   clear(container);
   for (const [key, label, kind] of METRICS) {
     const item = metrics?.[key] || null;
-    const available = item && typeof item.value === "number";
+    const available = isAvailableMetric(key, item, metrics, generatedAt);
     const card = element("article", "metric-item");
     card.append(element("p", "metric-label", label));
     card.append(element(

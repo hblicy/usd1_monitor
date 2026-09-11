@@ -539,6 +539,9 @@ class DashboardRepository:
         current_value = float(current["value"])
         if current_value <= 0:
             return None
+        current_at = datetime.fromisoformat(str(current["observed_at"]))
+        if now - current_at > timedelta(seconds=4500):
+            return None
         cutoff = now - timedelta(hours=24)
         cursor = await self.connection.execute(
             """

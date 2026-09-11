@@ -437,6 +437,34 @@ async def test_supply_change_24h_requires_recent_positive_baseline(
 
 
 @pytest.mark.asyncio
+async def test_supply_change_24h_rejects_stale_current_supply(storage) -> None:
+    await insert_observation(
+        storage,
+        "supply.multichain_total",
+        "global",
+        100.0,
+        observed_at=NOW - timedelta(hours=24, minutes=30),
+    )
+    await insert_observation(
+        storage,
+        "supply.multichain_total",
+        "global",
+        105.0,
+        observed_at=NOW - timedelta(seconds=4501),
+    )
+    repository = DashboardRepository(storage.path)
+    await repository.open()
+    try:
+        change = (await repository.snapshot(now=NOW))["metrics"][
+            "supply_change_24h"
+        ]
+    finally:
+        await repository.close()
+
+    assert change is None
+
+
+@pytest.mark.asyncio
 async def test_snapshot_sanitizes_collector_errors_and_exposes_health(storage) -> None:
     error = (
         "POST https://rpc.example/v3/secret-key?token=hidden failed status=429 "

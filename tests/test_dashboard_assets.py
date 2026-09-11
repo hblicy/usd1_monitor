@@ -156,3 +156,79 @@ def test_unavailable_metric_reason_checks_supply_and_reserve_freshness() -> None
         "等待下一次覆盖率计算",
         "正在积累24小时完整数据",
     ]
+
+
+def test_supply_metric_availability_rejects_stale_values() -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required for dashboard behavior tests")
+    javascript = (ASSET_ROOT / "dashboard.js").read_text(encoding="utf-8")
+    start = javascript.index("function isFreshMetric")
+    end = javascript.index("function renderMetrics", start)
+    metric_logic = javascript[start:end]
+    generated_at = "2026-09-11T03:00:00+00:00"
+    fresh = {
+        "value": 4_200_000_000,
+        "observed_at": "2026-09-11T02:30:00+00:00",
+    }
+    stale = {
+        "value": 4_200_000_000,
+        "observed_at": "2026-09-11T01:00:00+00:00",
+    }
+    cases = [
+        ["multichain_supply", stale, {}],
+        ["bridged_total", stale, {}],
+        ["locked_total", stale, {}],
+        ["bridge_delta", stale, {}],
+        [
+            "estimated_collateralization",
+            fresh,
+            {"multichain_supply": stale, "reserves": fresh},
+        ],
+        [
+            "estimated_collateralization",
+            fresh,
+            {"multichain_supply": fresh, "reserves": stale},
+        ],
+        ["supply_change_24h", fresh, {"multichain_supply": stale}],
+        ["multichain_supply", fresh, {}],
+        [
+            "estimated_collateralization",
+            fresh,
+            {"multichain_supply": fresh, "reserves": fresh},
+        ],
+        ["supply_change_24h", fresh, {"multichain_supply": fresh}],
+        ["reserves", stale, {}],
+    ]
+    script = "\n".join(
+        (
+            "const METRIC_FRESH_MS = 4500 * 1000;",
+            metric_logic,
+            f"const cases = {json.dumps(cases)};",
+            f"const generatedAt = {json.dumps(generated_at)};",
+            "process.stdout.write(JSON.stringify(cases.map(([key, item, metrics]) => "
+            "isAvailableMetric(key, item, metrics, generatedAt))));",
+        )
+    )
+
+    result = subprocess.run(
+        [node, "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+
+    assert json.loads(result.stdout) == [
+        False,
+        False,
+        False,
+        False,
+        False,
+        False,
+        False,
+        True,
+        True,
+        True,
+        True,
+    ]
