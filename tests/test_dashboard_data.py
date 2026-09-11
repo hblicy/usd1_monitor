@@ -467,6 +467,30 @@ async def test_snapshot_sanitizes_collector_errors_and_exposes_health(storage) -
     assert str(storage.path.resolve()) not in collector["last_error"]
 
 
+@pytest.mark.asyncio
+async def test_snapshot_ignores_legacy_supply_health_rows(storage) -> None:
+    for collector_id in ("supply_ethereum", "supply_bsc"):
+        await storage.record_collector_failure(collector_id, NOW, "old 429")
+        await storage.set_risk_state(
+            f"health.{collector_id}", RiskLevel.RED, NOW, NOW
+        )
+    await storage.record_collector_success("supply_native_ethereum", NOW)
+    await storage.record_collector_success("supply_native_bsc", NOW)
+    repository = DashboardRepository(storage.path)
+    await repository.open()
+    try:
+        health = (await repository.snapshot(now=NOW))["health"]
+    finally:
+        await repository.close()
+
+    assert health["level"] == "UNKNOWN"
+    assert health["items"] == []
+    assert {item["collector_id"] for item in health["collectors"]} == {
+        "supply_native_ethereum",
+        "supply_native_bsc",
+    }
+
+
 def test_dashboard_text_keeps_source_path_but_removes_url_secrets() -> None:
     value = (
         "来源 https://docs.example/report?id=123&token=hidden#section，请核对"

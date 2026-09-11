@@ -43,6 +43,10 @@ RULE_LABELS = {
 }
 
 MONITOR_STALE_SECONDS = 900
+LEGACY_COLLECTOR_IDS = frozenset({"supply_ethereum", "supply_bsc"})
+LEGACY_HEALTH_RULE_IDS = frozenset(
+    f"health.{collector_id}" for collector_id in LEGACY_COLLECTOR_IDS
+)
 
 METRIC_KEYS = {
     ("market.mid_price", "USD1USDT"): "price_usd1usdt",
@@ -246,6 +250,7 @@ class DashboardRepository:
                 changed_at=datetime.fromisoformat(row["changed_at"]),
             )
             for row in rows
+            if str(row["rule_id"]) not in LEGACY_HEALTH_RULE_IDS
         ]
 
     async def _state_group(
@@ -327,6 +332,8 @@ class DashboardRepository:
         result: list[dict[str, object]] = []
         activities: list[datetime] = []
         for row in rows:
+            if str(row["collector_id"]) in LEGACY_COLLECTOR_IDS:
+                continue
             error = str(row["last_error"]) if row["last_error"] else None
             if error is not None:
                 for database_path in database_values:
