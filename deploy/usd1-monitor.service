@@ -5,18 +5,18 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=usd1-monitor
-Group=usd1-monitor
-WorkingDirectory=/opt/usd1-monitor
-EnvironmentFile=/etc/usd1-monitor.env
-ExecStart=/opt/usd1-monitor/.venv/bin/python -m usd1_monitor --config /etc/usd1-monitor.yaml run
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/usd1_monitor
+EnvironmentFile=/home/ubuntu/usd1_monitor/.env
+ExecStart=/home/ubuntu/usd1_monitor/.venv/bin/python -m usd1_monitor --config /home/ubuntu/usd1_monitor/config.yaml run
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
-ProtectHome=true
-ReadWritePaths=/var/lib/usd1-monitor /var/log/usd1-monitor
+ProtectHome=read-only
+ReadWritePaths=/home/ubuntu/usd1_monitor/data /home/ubuntu/usd1_monitor/logs
 
 [Install]
 WantedBy=multi-user.target
