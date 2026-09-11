@@ -140,28 +140,31 @@ function formatMetric(item, kind) {
   return item.unit ? `${value} ${item.unit}` : value;
 }
 
+function isFreshMetric(item, generatedAt) {
+  if (!item || typeof item.value !== "number") return false;
+  const generated = Date.parse(generatedAt);
+  const observed = Date.parse(item.observed_at);
+  return (
+    !Number.isNaN(generated)
+    && !Number.isNaN(observed)
+    && generated - observed <= METRIC_FRESH_MS
+  );
+}
+
 function unavailableMetricReason(key, metrics, generatedAt) {
-  const completeSupply = metrics?.multichain_supply || null;
+  const completeSupplyFresh = isFreshMetric(metrics?.multichain_supply, generatedAt);
   if (["multichain_supply", "bridged_total", "locked_total", "bridge_delta"].includes(key)) {
     return "等待完整多链供应量采集";
   }
   if (key === "estimated_collateralization") {
-    if (!completeSupply) return "等待完整多链供应量采集";
-    const reserves = metrics?.reserves || null;
-    if (!reserves) return "等待官方储备数据更新";
-    const generated = Date.parse(generatedAt);
-    const observed = Date.parse(reserves.observed_at);
-    if (
-      Number.isNaN(generated)
-      || Number.isNaN(observed)
-      || generated - observed > METRIC_FRESH_MS
-    ) {
+    if (!completeSupplyFresh) return "等待完整多链供应量采集";
+    if (!isFreshMetric(metrics?.reserves, generatedAt)) {
       return "等待官方储备数据更新";
     }
     return "等待下一次覆盖率计算";
   }
   if (key === "supply_change_24h") {
-    return completeSupply
+    return completeSupplyFresh
       ? "正在积累24小时完整数据"
       : "等待完整多链供应量采集";
   }
