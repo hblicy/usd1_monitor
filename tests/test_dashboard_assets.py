@@ -48,3 +48,13 @@ def test_dashboard_assets_distinguish_ratio_changes_and_risk_groups() -> None:
     assert "资产风险" in javascript
     assert "数据与监控异常" in javascript
     assert ".risk-group" in css
+
+
+def test_dashboard_assets_explain_unavailable_supply_metrics() -> None:
+    javascript = (ASSET_ROOT / "dashboard.js").read_text(encoding="utf-8")
+
+    assert "function unavailableMetricReason" in javascript
+    assert "等待完整多链供应量采集" in javascript
+    assert "等待官方储备数据更新" in javascript
+    assert "正在积累24小时完整数据" in javascript
+    assert "renderMetrics(snapshot.metrics, snapshot.generated_at)" in javascript

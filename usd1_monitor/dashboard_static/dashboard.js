@@ -2,6 +2,7 @@
 
 const REFRESH_MS = 30000;
 const REQUEST_TIMEOUT_MS = 10000;
+const METRIC_FRESH_MS = 4500 * 1000;
 
 const LEVELS = {
   GREEN: { label: "正常 GREEN", business: "当前未发现影响 USD1 稳定性的重大风险。", health: "监控服务和数据源运行正常。" },
@@ -139,16 +140,51 @@ function formatMetric(item, kind) {
   return item.unit ? `${value} ${item.unit}` : value;
 }
 
-function renderMetrics(metrics) {
+function unavailableMetricReason(key, metrics, generatedAt) {
+  const completeSupply = metrics?.multichain_supply || null;
+  if (["multichain_supply", "bridged_total", "locked_total", "bridge_delta"].includes(key)) {
+    return "等待完整多链供应量采集";
+  }
+  if (key === "estimated_collateralization") {
+    if (!completeSupply) return "等待完整多链供应量采集";
+    const reserves = metrics?.reserves || null;
+    if (!reserves) return "等待官方储备数据更新";
+    const generated = Date.parse(generatedAt);
+    const observed = Date.parse(reserves.observed_at);
+    if (
+      Number.isNaN(generated)
+      || Number.isNaN(observed)
+      || generated - observed > METRIC_FRESH_MS
+    ) {
+      return "等待官方储备数据更新";
+    }
+    return "等待下一次覆盖率计算";
+  }
+  if (key === "supply_change_24h") {
+    return completeSupply
+      ? "正在积累24小时完整数据"
+      : "等待完整多链供应量采集";
+  }
+  return "暂无数据";
+}
+
+function renderMetrics(metrics, generatedAt) {
   const container = document.getElementById("metric-grid");
   clear(container);
   for (const [key, label, kind] of METRICS) {
     const item = metrics?.[key] || null;
+    const available = item && typeof item.value === "number";
     const card = element("article", "metric-item");
     card.append(element("p", "metric-label", label));
-    card.append(element("p", "metric-value", formatMetric(item, kind)));
-    let metadata = "暂无数据";
-    if (item) {
+    card.append(element(
+      "p",
+      "metric-value",
+      available
+        ? formatMetric(item, kind)
+        : unavailableMetricReason(key, metrics, generatedAt),
+    ));
+    let metadata = "暂时无法计算";
+    if (available) {
       const fill = Object.hasOwn(item, "fully_fillable") ? (item.fully_fillable ? " · 可完全成交" : " · 深度不足") : "";
       metadata = `${item.quality || "质量未知"} · ${formatTime(item.observed_at)}${fill}`;
     }
@@ -229,7 +265,7 @@ function renderSnapshot(snapshot) {
   renderStatus("business", snapshot.business);
   renderStatus("health", snapshot.health);
   renderActiveRisks(snapshot);
-  renderMetrics(snapshot.metrics);
+  renderMetrics(snapshot.metrics, snapshot.generated_at);
   renderCollectors(snapshot.health?.collectors || []);
   renderAlerts(snapshot.recent?.alerts || []);
   renderChainEvents(snapshot.recent?.chain_events || []);
@@ -245,7 +281,7 @@ function renderUnavailable() {
   document.getElementById("health-message").textContent = "数据暂时无法读取，不能判断监控健康。";
   document.getElementById("last-updated").textContent = "数据暂时无法读取";
   renderActiveRisks({ business: { level: "UNKNOWN", items: [] }, health: { level: "UNKNOWN", items: [] } });
-  renderMetrics({});
+  renderMetrics({}, null);
   renderCollectors([]);
   renderAlerts([]);
   renderChainEvents([]);
@@ -288,6 +324,6 @@ window.addEventListener("resize", () => {
   document.getElementById("refresh-button").textContent = window.innerWidth <= 420 ? "刷新" : "立即刷新";
 });
 
-renderMetrics({});
+renderMetrics({}, null);
 refreshDashboard();
 window.setInterval(refreshDashboard, REFRESH_MS);
