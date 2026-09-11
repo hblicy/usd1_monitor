@@ -93,3 +93,21 @@ def test_dashboard_systemd_service_is_read_only_and_local() -> None:
     for legacy_path in LEGACY_DEPLOYMENT_PATHS:
         assert legacy_path not in service
     assert "0.0.0.0" not in service
+
+
+def test_readme_systemd_commands_use_home_deployment() -> None:
+    readme = Path("README.md").read_text(encoding="utf-8")
+
+    for required in (
+        "cd /home/ubuntu/usd1_monitor",
+        "python3 -m venv .venv",
+        "cp -n deploy/config.production.example.yaml config.yaml",
+        "cp -n .env.example .env",
+        "mkdir -p data logs",
+        "/home/ubuntu/usd1_monitor/data/monitor.db",
+        "/home/ubuntu/usd1_monitor/logs/usd1-monitor.log",
+    ):
+        assert required in readme
+    for legacy_path in LEGACY_DEPLOYMENT_PATHS:
+        assert legacy_path not in readme
+    assert "sudo -u usd1-monitor" not in readme

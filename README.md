@@ -30,7 +30,7 @@ BSC_RPC_URLS=https://bsc-primary.example,https://bsc-backup.example
 # 其他链也可使用逗号分隔的 *_RPC_URLS 覆盖，详见 .env.example
 ```
 
-Linux 上执行 `chmod 600 .env` 或 `/etc/usd1-monitor.env`。不要提交 `.env`、真实 webhook、带密钥的 RPC URL、数据库或日志。
+Linux 上执行 `chmod 600 /home/ubuntu/usd1_monitor/.env`。不要提交 `.env`、真实 webhook、带密钥的 RPC URL、数据库或日志。
 
 四个命令：
 
@@ -92,16 +92,16 @@ dashboard:
 
 生产配置模板为 `deploy/config.production.example.yaml`，监控服务单元为 `deploy/usd1-monitor.service`，只读网页服务单元为 `deploy/usd1-dashboard.service`。
 
+以下命令假定仓库已经位于 `/home/ubuntu/usd1_monitor`。`cp -n` 不会覆盖已有的 `config.yaml` 和 `.env`；首次部署复制完成后，请先填写这两个文件再启动服务。
+
 ```bash
-sudo useradd --system --home /opt/usd1-monitor --shell /usr/sbin/nologin usd1-monitor
-sudo mkdir -p /opt/usd1-monitor /var/lib/usd1-monitor /var/log/usd1-monitor
-sudo chown -R usd1-monitor:usd1-monitor /opt/usd1-monitor /var/lib/usd1-monitor /var/log/usd1-monitor
-# 将程序复制到 /opt/usd1-monitor 后：
-sudo -u usd1-monitor python3 -m venv /opt/usd1-monitor/.venv
-sudo -u usd1-monitor /opt/usd1-monitor/.venv/bin/pip install -r /opt/usd1-monitor/requirements.txt
-sudo cp deploy/config.production.example.yaml /etc/usd1-monitor.yaml
-sudo cp .env.example /etc/usd1-monitor.env
-sudo chmod 600 /etc/usd1-monitor.env
+cd /home/ubuntu/usd1_monitor
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+cp -n deploy/config.production.example.yaml config.yaml
+cp -n .env.example .env
+chmod 600 .env
+mkdir -p data logs
 sudo cp deploy/usd1-monitor.service /etc/systemd/system/
 sudo cp deploy/usd1-dashboard.service /etc/systemd/system/
 sudo systemctl daemon-reload
@@ -120,19 +120,19 @@ ssh -L 8080:127.0.0.1:8080 ubuntu@服务器IP
 
 保持该 SSH 会话打开，然后在本机浏览器访问 `http://127.0.0.1:8080`。若修改了 `dashboard.port`，隧道命令两处端口和浏览器地址需要同步修改。网页服务只读数据库，停止或重启它不会影响监控采集和企业微信通知。
 
-应用日志默认在 `/var/log/usd1-monitor/monitor.log`，SQLite 在 `/var/lib/usd1-monitor/monitor.db`。数据库在线备份使用 SQLite 自带命令，避免直接复制 WAL 中的活跃数据库：
+应用日志默认在 `/home/ubuntu/usd1_monitor/logs/usd1-monitor.log`，SQLite 在 `/home/ubuntu/usd1_monitor/data/monitor.db`。数据库在线备份使用 SQLite 自带命令，避免直接复制 WAL 中的活跃数据库：
 
 ```bash
-sudo -u usd1-monitor sqlite3 /var/lib/usd1-monitor/monitor.db ".backup '/var/lib/usd1-monitor/monitor-backup.db'"
+sqlite3 /home/ubuntu/usd1_monitor/data/monitor.db ".backup '/home/ubuntu/usd1_monitor/data/monitor-backup.db'"
 ```
 
 如果旧版本已经产生大量官方公告误报，部署本修复时可一次性清理尚未发送的对应队列。必须先停止旧进程，先预览再删除；以下操作不影响已发送历史、风险状态或其他类型告警：
 
 ```bash
 sudo systemctl stop usd1-monitor
-sudo -u usd1-monitor sqlite3 /var/lib/usd1-monitor/monitor.db ".backup '/var/lib/usd1-monitor/monitor-before-information-alert-fix-20260909.db'"
-sudo -u usd1-monitor sqlite3 /var/lib/usd1-monitor/monitor.db "SELECT id,status,alert_key FROM alert_deliveries WHERE delivered_at IS NULL AND status IN ('PENDING','IN_FLIGHT') AND (alert_key LIKE 'official:%' OR alert_key LIKE 'expiry:event.information.%') ORDER BY id;"
-sudo -u usd1-monitor sqlite3 /var/lib/usd1-monitor/monitor.db "BEGIN IMMEDIATE; DELETE FROM alert_deliveries WHERE delivered_at IS NULL AND status IN ('PENDING','IN_FLIGHT') AND (alert_key LIKE 'official:%' OR alert_key LIKE 'expiry:event.information.%'); COMMIT;"
+sqlite3 /home/ubuntu/usd1_monitor/data/monitor.db ".backup '/home/ubuntu/usd1_monitor/data/monitor-before-information-alert-fix-20260909.db'"
+sqlite3 /home/ubuntu/usd1_monitor/data/monitor.db "SELECT id,status,alert_key FROM alert_deliveries WHERE delivered_at IS NULL AND status IN ('PENDING','IN_FLIGHT') AND (alert_key LIKE 'official:%' OR alert_key LIKE 'expiry:event.information.%') ORDER BY id;"
+sqlite3 /home/ubuntu/usd1_monitor/data/monitor.db "BEGIN IMMEDIATE; DELETE FROM alert_deliveries WHERE delivered_at IS NULL AND status IN ('PENDING','IN_FLIGHT') AND (alert_key LIKE 'official:%' OR alert_key LIKE 'expiry:event.information.%'); COMMIT;"
 sudo systemctl start usd1-monitor
 ```
 
