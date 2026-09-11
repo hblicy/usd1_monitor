@@ -57,7 +57,26 @@ def test_external_flows_use_expected_sign_and_per_address_outflow() -> None:
     result = summarize_transfers(transfers, GROUP, NOW)
 
     assert result.entity_net_24h == 45_000_000
-    assert result.address_outflow_1h == {"0xaaa": 0, "0xbbb": 25_000_000}
+    assert result.address_outflow_1h == {
+        "0xaaa": -80_000_000,
+        "0xbbb": 25_000_000,
+    }
+
+
+def test_external_inflow_offsets_same_address_outflow_before_alerting() -> None:
+    transfers = [
+        Transfer("0xoutside", "0xaaa", 200_000_000, NOW - timedelta(minutes=30)),
+        Transfer("0xaaa", "0xoutside", 100_000_001, NOW - timedelta(minutes=10)),
+    ]
+
+    flow = summarize_transfers(transfers, GROUP, NOW)
+
+    assert flow.address_outflow_1h["0xaaa"] == -99_999_999
+    assert evaluate_address_outflow(
+        flow.address_outflow_1h,
+        RiskLevel.GREEN,
+        0,
+    ) == RuleDecision(RiskLevel.GREEN, 0)
 
 
 def test_flow_windows_include_exact_boundaries_and_exclude_older_records() -> None:
@@ -96,6 +115,9 @@ def test_empty_inputs_produce_zero_flow_and_normalized_group_keys() -> None:
     ("transfer", "message"),
     [
         (Transfer("0xaaa", "0xoutside", -1, NOW), "amount"),
+        (Transfer("0xaaa", "0xoutside", float("nan"), NOW), "finite"),
+        (Transfer("0xaaa", "0xoutside", float("inf"), NOW), "finite"),
+        (Transfer("0xaaa", "0xoutside", float("-inf"), NOW), "finite"),
         (
             Transfer("0xaaa", "0xoutside", 1, NOW + timedelta(microseconds=1)),
             "future",
@@ -108,6 +130,16 @@ def test_invalid_transfer_data_is_rejected(
 ) -> None:
     with pytest.raises(ValueError, match=message):
         summarize_transfers([transfer], GROUP, NOW)
+
+
+def test_transfer_timestamps_and_now_must_be_timezone_aware() -> None:
+    naive_now = NOW.replace(tzinfo=None)
+    naive_transfer = Transfer("0xaaa", "0xoutside", 1, naive_now)
+
+    with pytest.raises(ValueError, match="now.*timezone-aware"):
+        summarize_transfers([], GROUP, naive_now)
+    with pytest.raises(ValueError, match="observed_at.*timezone-aware"):
+        summarize_transfers([naive_transfer], GROUP, NOW)
 
 
 @pytest.mark.parametrize(
@@ -128,6 +160,24 @@ def test_concentration_uses_strict_thresholds(
     assert result == RuleDecision(expected, 0)
 
 
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_concentration_rejects_non_finite_share(value: float) -> None:
+    with pytest.raises(ValueError, match="share.*finite"):
+        evaluate_concentration(value, RiskLevel.GREEN, 0)
+
+
+@pytest.mark.parametrize("field", ["yellow", "red"])
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_concentration_rejects_non_finite_thresholds(
+    field: str,
+    value: float,
+) -> None:
+    kwargs = {field: value}
+
+    with pytest.raises(ValueError, match=f"{field}.*finite"):
+        evaluate_concentration(0.60, RiskLevel.GREEN, 0, **kwargs)
+
+
 @pytest.mark.parametrize("value", [50_000_000, -50_000_000])
 def test_entity_flow_threshold_is_strict(value: float) -> None:
     assert evaluate_entity_flow(value, RiskLevel.GREEN, 0) == RuleDecision(
@@ -142,6 +192,18 @@ def test_entity_flow_warning_never_raises_red(value: float) -> None:
         RiskLevel.YELLOW,
         0,
     )
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_entity_flow_rejects_non_finite_value(value: float) -> None:
+    with pytest.raises(ValueError, match="value.*finite"):
+        evaluate_entity_flow(value, RiskLevel.GREEN, 0)
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_entity_flow_rejects_non_finite_threshold(value: float) -> None:
+    with pytest.raises(ValueError, match="threshold.*finite"):
+        evaluate_entity_flow(1, RiskLevel.GREEN, 0, threshold=value)
 
 
 def test_address_outflow_threshold_is_strict_and_empty_is_clear() -> None:
@@ -162,6 +224,23 @@ def test_address_outflow_warning_never_raises_red() -> None:
         RiskLevel.RED,
         1,
     ) == RuleDecision(RiskLevel.YELLOW, 0)
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_address_outflow_rejects_non_finite_values(value: float) -> None:
+    with pytest.raises(ValueError, match="values.*finite"):
+        evaluate_address_outflow({"0xaaa": value}, RiskLevel.GREEN, 0)
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_address_outflow_rejects_non_finite_threshold(value: float) -> None:
+    with pytest.raises(ValueError, match="threshold.*finite"):
+        evaluate_address_outflow(
+            {"0xaaa": 1},
+            RiskLevel.GREEN,
+            0,
+            threshold=value,
+        )
 
 
 @pytest.mark.parametrize(
@@ -224,3 +303,25 @@ def test_custom_recovery_check_count_is_supported() -> None:
     assert first == RuleDecision(RiskLevel.RED, 1)
     assert second == RuleDecision(RiskLevel.RED, 2)
     assert third == RuleDecision(RiskLevel.GREEN, 0)
+
+
+@pytest.mark.parametrize(
+    ("clear_checks", "recovery_checks", "message"),
+    [
+        (-1, 2, "clear_checks"),
+        (0, 0, "recovery_checks"),
+        (0, -1, "recovery_checks"),
+    ],
+)
+def test_recovery_counters_must_be_valid(
+    clear_checks: int,
+    recovery_checks: int,
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        evaluate_concentration(
+            0.10,
+            RiskLevel.GREEN,
+            clear_checks,
+            recovery_checks=recovery_checks,
+        )

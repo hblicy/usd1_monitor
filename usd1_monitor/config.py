@@ -185,10 +185,18 @@ class CustodyAddressConfig(StrictModel):
 class CustodyConfig(StrictModel):
     interval_seconds: int = Field(default=600, ge=60)
     verification_max_age_days: int = Field(default=90, ge=1)
-    yellow_share: float = Field(default=0.50, gt=0, lt=1)
-    red_share: float = Field(default=0.70, gt=0, lt=1)
-    entity_flow_24h: float = Field(default=50_000_000, gt=0)
-    address_outflow_1h: float = Field(default=100_000_000, gt=0)
+    yellow_share: float = Field(default=0.50, gt=0, lt=1, allow_inf_nan=False)
+    red_share: float = Field(default=0.70, gt=0, lt=1, allow_inf_nan=False)
+    entity_flow_24h: float = Field(
+        default=50_000_000,
+        gt=0,
+        allow_inf_nan=False,
+    )
+    address_outflow_1h: float = Field(
+        default=100_000_000,
+        gt=0,
+        allow_inf_nan=False,
+    )
     recovery_checks: int = Field(default=2, ge=1)
     addresses: list[CustodyAddressConfig] = Field(default_factory=list)
 

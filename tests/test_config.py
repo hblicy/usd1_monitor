@@ -236,6 +236,24 @@ def test_custody_defaults_and_threshold_order() -> None:
         CustodyConfig(yellow_share=0.70, red_share=0.50)
 
 
+@pytest.mark.parametrize(
+    "field",
+    [
+        "yellow_share",
+        "red_share",
+        "entity_flow_24h",
+        "address_outflow_1h",
+    ],
+)
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_custody_rejects_non_finite_thresholds(
+    field: str,
+    value: float,
+) -> None:
+    with pytest.raises(ValueError):
+        CustodyConfig.model_validate({field: value})
+
+
 def test_trusted_custody_address_accepts_two_independent_labels() -> None:
     item = CustodyAddressConfig.model_validate(
         {
