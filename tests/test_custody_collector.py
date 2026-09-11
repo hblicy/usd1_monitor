@@ -421,10 +421,7 @@ async def test_trusted_solana_slot_drift_blocks_trusted_aggregate() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("candidate_slot", [None, 901])
-async def test_candidate_slot_error_does_not_pollute_trusted_set(
-    candidate_slot: int | None,
-) -> None:
+async def test_candidate_missing_slot_does_not_pollute_trusted_set() -> None:
     trusted = _address(chain="solana", address=SOLANA_OWNER, label="Trusted")
     candidate = _address(
         chain="solana",
@@ -436,10 +433,9 @@ async def test_candidate_slot_error_does_not_pollute_trusted_set(
     candidate_body = _solana_accounts(
         candidate.address,
         [9_000_000],
-        slot=candidate_slot or 900,
+        slot=900,
     )
-    if candidate_slot is None:
-        candidate_body.pop("context")
+    candidate_body.pop("context")
     rpc = FakeRpc()
     rpc.result(
         "getTokenAccountsByOwner",
@@ -455,8 +451,45 @@ async def test_candidate_slot_error_does_not_pollute_trusted_set(
     assert result.trusted_balance == 3
     assert [item.metadata["label"] for item in result.observations] == ["Trusted"]
     assert result.errors[0].label == "Candidate"
-    expected = "context.slot" if candidate_slot is None else "slot drift"
-    assert expected in str(result.errors[0].error)
+    assert "context.slot" in str(result.errors[0].error)
+
+
+@pytest.mark.asyncio
+async def test_candidate_at_different_real_slot_remains_visible() -> None:
+    trusted = _address(chain="solana", address=SOLANA_OWNER, label="Trusted")
+    candidate = _address(
+        chain="solana",
+        address="2ojv9BAiHUrvsm9gxDe7fJSzbNZSJcxZvf8dqmWGHG8S",
+        label="Candidate",
+        status="candidate",
+        verified_on=None,
+    )
+    rpc = FakeRpc()
+    rpc.result(
+        "getTokenAccountsByOwner",
+        _solana_accounts(trusted.address, [3_000_000], slot=900),
+    )
+    rpc.result(
+        "getTokenAccountsByOwner",
+        _solana_accounts(candidate.address, [9_000_000], slot=901),
+    )
+
+    result = await CustodyBalanceCollector({}, rpc).collect_solana(
+        [trusted, candidate], NOW, trusted_addresses=[trusted]
+    )
+
+    assert result.trusted_complete is True
+    assert result.trusted_balance == 3
+    assert result.errors == ()
+    assert [item.metadata["label"] for item in result.observations] == [
+        "Trusted",
+        "Candidate",
+    ]
+    assert [item.metadata["safe_block"] for item in result.observations] == [
+        900,
+        901,
+    ]
+    assert result.safe_block == 900
 
 
 @pytest.mark.asyncio
@@ -596,7 +629,7 @@ async def test_expired_trusted_is_displayed_but_excluded_from_trusted_sum() -> N
     )
     rpc.result(
         "getTokenAccountsByOwner",
-        _solana_accounts(expired.address, [9_000_000]),
+        _solana_accounts(expired.address, [9_000_000], slot=124),
     )
 
     result = await CustodyBalanceCollector({}, rpc).collect_solana(
@@ -611,6 +644,7 @@ async def test_expired_trusted_is_displayed_but_excluded_from_trusted_sum() -> N
         "candidate",
     ]
     assert result.observations[1].metadata["configured_status"] == "trusted"
+    assert result.observations[1].metadata["safe_block"] == 124
     assert result.trusted_balance == 3
 
 

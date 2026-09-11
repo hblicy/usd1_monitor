@@ -378,7 +378,11 @@ class CustodyBalanceCollector:
                 continue
 
             slot, raw_total, token_accounts = result
-            if reference_slot is not None and slot != reference_slot:
+            if (
+                is_trusted
+                and reference_slot is not None
+                and slot != reference_slot
+            ):
                 error = CustodyDataError(
                     f"solana custody address {item.address} ({item.label}) "
                     f"slot drift: expected {reference_slot}, received {slot}"
