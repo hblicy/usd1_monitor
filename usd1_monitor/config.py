@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import re
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal, Mapping
 from urllib.parse import urlsplit
@@ -32,46 +32,39 @@ class StrictModel(BaseModel):
 
 
 _BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
-_COMMON_MULTI_LABEL_SUFFIXES = {
-    "ac.uk",
-    "co.ar",
-    "co.br",
-    "co.cn",
-    "co.in",
-    "co.jp",
-    "co.kr",
-    "co.nz",
-    "co.uk",
-    "co.za",
-    "com.au",
-    "com.br",
-    "com.cn",
-    "com.hk",
-    "com.mx",
-    "com.my",
-    "com.ph",
-    "com.sg",
-    "com.tr",
-    "com.tw",
-    "gov.uk",
-    "net.au",
-    "net.uk",
-    "ne.jp",
-    "org.au",
-    "org.uk",
+_LABEL_SOURCE_DOMAINS = {
+    "etherscan.io",
+    "bscscan.com",
+    "solscan.io",
+    "arkm.com",
+    "birdeye.so",
 }
 
 
 def is_verification_current(
     verified_on: date,
     verification_max_age_days: int,
-    as_of: date | None = None,
+    as_of: date,
 ) -> bool:
-    """Return whether evidence is current when evaluated at an as-of UTC date."""
-    current_date = as_of or datetime.now(timezone.utc).date()
-    if verified_on > current_date:
+    """Return whether evidence is current at the caller's configured date."""
+    if verified_on > as_of:
         return False
-    return (current_date - verified_on).days <= verification_max_age_days
+    return (as_of - verified_on).days <= verification_max_age_days
+
+
+def current_date_for_timezone(
+    timezone_name: str, now: datetime | None = None
+) -> date:
+    instant = now or datetime.now(timezone.utc)
+    if instant.tzinfo is None:
+        instant = instant.replace(tzinfo=timezone.utc)
+    if timezone_name == "UTC":
+        target_timezone = timezone.utc
+    elif timezone_name == "Asia/Shanghai":
+        target_timezone = timezone(timedelta(hours=8), name=timezone_name)
+    else:
+        target_timezone = ZoneInfo(timezone_name)
+    return instant.astimezone(target_timezone).date()
 
 
 def _decode_base58(value: str) -> bytes:
@@ -146,7 +139,18 @@ class CustodyAddressConfig(StrictModel):
                     "Solana custody address must decode to exactly 32 bytes"
                 )
 
-        hosts = [_normalize_evidence_source(item.url) for item in self.evidence]
+        hosts = []
+        for item in self.evidence:
+            host = _normalize_evidence_host(item.url)
+            if item.kind == "label":
+                source = _normalize_label_source(host)
+                if source is None:
+                    raise ValueError(
+                        "label evidence host is not an allowed label evidence source"
+                    )
+                hosts.append(source)
+            else:
+                hosts.append(host)
         if len(hosts) != len(set(hosts)):
             raise ValueError("address evidence hosts must be independent")
 
@@ -164,12 +168,6 @@ class CustodyAddressConfig(StrictModel):
         ]
         if any(host not in owner_hosts for host in official_hosts):
             raise ValueError("official evidence host does not match entity")
-
-        if (
-            self.verified_on is not None
-            and self.verified_on > datetime.now(timezone.utc).date()
-        ):
-            raise ValueError("custody address verified_on must not be in the future")
 
         if self.status != "trusted":
             return self
@@ -209,20 +207,20 @@ class CustodyConfig(StrictModel):
         ]
         if len(keys) != len(set(keys)):
             raise ValueError("custody addresses must be unique within each chain")
-        for item in self.addresses:
-            if (
-                item.status == "trusted"
-                and item.verified_on is not None
-                and not is_verification_current(
-                    item.verified_on,
-                    self.verification_max_age_days,
-                )
-            ):
-                raise ValueError(
-                    "address verification is older than "
-                    f"{self.verification_max_age_days} days"
-                )
         return self
+
+    def trusted_addresses(self, as_of: date) -> list[CustodyAddressConfig]:
+        return [
+            item
+            for item in self.addresses
+            if item.status == "trusted"
+            and item.verified_on is not None
+            and is_verification_current(
+                item.verified_on,
+                self.verification_max_age_days,
+                as_of,
+            )
+        ]
 
 
 class RedemptionConfig(StrictModel):
@@ -282,15 +280,11 @@ def _normalize_evidence_host(url: str) -> str:
     return host.casefold().removeprefix("www.")
 
 
-def _normalize_evidence_source(url: str) -> str:
-    host = _normalize_evidence_host(url)
-    labels = host.split(".")
-    if len(labels) < 2:
-        return host
-    suffix = ".".join(labels[-2:])
-    if suffix in _COMMON_MULTI_LABEL_SUFFIXES and len(labels) >= 3:
-        return ".".join(labels[-3:])
-    return suffix
+def _normalize_label_source(host: str) -> str | None:
+    for domain in _LABEL_SOURCE_DOMAINS:
+        if host == domain or host.endswith(f".{domain}"):
+            return domain
+    return None
 
 
 class HttpConfig(StrictModel):
@@ -632,6 +626,29 @@ class AppConfig(StrictModel):
         return value
 
 
+def _validate_custody_dates(config: AppConfig) -> None:
+    as_of = current_date_for_timezone(config.timezone)
+    for item in config.custody.addresses:
+        if item.verified_on is not None and item.verified_on > as_of:
+            raise ConfigError(
+                "custody address verified_on must not be in the future "
+                f"for timezone {config.timezone}"
+            )
+        if (
+            item.status == "trusted"
+            and item.verified_on is not None
+            and not is_verification_current(
+                item.verified_on,
+                config.custody.verification_max_age_days,
+                as_of,
+            )
+        ):
+            raise ConfigError(
+                "address verification is older than "
+                f"{config.custody.verification_max_age_days} days"
+            )
+
+
 def load_config(
     path: Path, environ: Mapping[str, str] | None = None
 ) -> AppConfig:
@@ -642,6 +659,7 @@ def load_config(
             raise ConfigError(f"configuration root must be a mapping at {path}")
         raw["wechat_webhook"] = values.get("WECHAT_WEBHOOK") or None
         config = AppConfig.model_validate(raw)
+        _validate_custody_dates(config)
         ethereum_urls = _rpc_urls_from_environment(values.get("ETH_RPC_URLS"))
         bsc_urls = _rpc_urls_from_environment(values.get("BSC_RPC_URLS"))
         ethereum = config.chains.ethereum
