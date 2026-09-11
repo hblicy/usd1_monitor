@@ -134,7 +134,9 @@ def test_custody_rejects_invalid_address_formats() -> None:
 
 
 def test_load_config_rejects_future_verification_date(tmp_path: Path) -> None:
-    tomorrow = (datetime.now(timezone.utc).date() + timedelta(days=1)).isoformat()
+    tomorrow = (
+        current_date_for_timezone("Asia/Shanghai") + timedelta(days=1)
+    ).isoformat()
     path = tmp_path / "config.yaml"
     path.write_text(
         f"""
