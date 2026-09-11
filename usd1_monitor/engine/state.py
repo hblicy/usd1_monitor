@@ -8,7 +8,6 @@ from typing import Iterable
 from usd1_monitor.models import RiskLevel, RiskTransition, RuleEvaluation
 from usd1_monitor.engine.aggregate import (
     business_overall,
-    health_overall,
     is_monitoring_health_rule,
 )
 from usd1_monitor.notifications.wechat import format_transitions, split_wechat_text
@@ -87,8 +86,15 @@ class StateEngine:
         if not enqueue_alerts:
             return transitions
 
+        alertable_transitions = [
+            transition
+            for transition in transitions
+            if not is_monitoring_health_rule(transition.rule_id)
+        ]
+        if not alertable_transitions:
+            return transitions
         groups: dict[str, list[RiskTransition]] = defaultdict(list)
-        for index, transition in enumerate(transitions):
+        for index, transition in enumerate(alertable_transitions):
             group_key = transition.cause_id or f"rule:{index}:{transition.rule_id}"
             groups[group_key].append(transition)
         states = await self._storage.list_risk_states()
@@ -97,18 +103,10 @@ class StateEngine:
             now=now,
             event_active_seconds=self._storage.event_active_seconds,
         )
-        health_level = health_overall(states)
         for group_key, group in groups.items():
-            overall = (
-                health_level
-                if all(
-                    is_monitoring_health_rule(item.rule_id) for item in group
-                )
-                else business_level
-            )
             content = format_transitions(
                 group,
-                overall_level=overall,
+                overall_level=business_level,
                 timezone_name=self._storage.timezone_name,
             )
             alert_key = f"{group_key}:{now.isoformat()}"

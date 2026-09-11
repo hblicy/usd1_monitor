@@ -1237,7 +1237,7 @@ async def test_bridge_evaluation_failure_rolls_back_complete_totals(
 
 
 @pytest.mark.asyncio
-async def test_three_partial_runs_enqueue_one_grouped_health_alert(
+async def test_three_partial_runs_persist_health_without_alert(
     storage,
 ) -> None:
     por = FakePorCollector()
@@ -1257,10 +1257,9 @@ async def test_three_partial_runs_enqueue_one_grouped_health_alert(
         )
 
     pending = await storage.pending_alerts()
-    assert len(pending) == 1
-    assert "Tron" in pending[0].content
-    assert "Aptos" in pending[0].content
-    assert "供应量数据连续 3 次未能完整获取" in pending[0].content
+    assert pending == []
+    state = await storage.get_risk_state("health.supply_multichain")
+    assert state is not None and state.level is RiskLevel.YELLOW
 
 
 @pytest.mark.asyncio
@@ -1306,12 +1305,15 @@ async def test_grouped_supply_health_recovers_once_after_dwell(
         deliver=False,
         now=NOW + timedelta(seconds=32),
     )
-    assert len(await storage.pending_alerts()) == 1
+    assert await storage.pending_alerts() == []
+    state = await storage.get_risk_state("health.supply_multichain")
+    assert state is not None and state.level is RiskLevel.YELLOW
 
     await monitor.check_once(
         deliver=False,
         now=NOW + timedelta(seconds=63),
     )
     pending = await storage.pending_alerts()
-    assert len(pending) == 2
-    assert "供应量数据获取已恢复" in pending[-1].content
+    assert pending == []
+    state = await storage.get_risk_state("health.supply_multichain")
+    assert state is not None and state.level is RiskLevel.GREEN
