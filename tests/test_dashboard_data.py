@@ -491,6 +491,35 @@ async def test_snapshot_ignores_legacy_supply_health_rows(storage) -> None:
     }
 
 
+@pytest.mark.asyncio
+async def test_snapshot_ignores_legacy_supply_recent_alerts(storage) -> None:
+    await storage.insert_pending_alert_uncommitted(
+        f"rule:2:market.price:{NOW.isoformat()}",
+        "current-alert",
+        "当前有效告警",
+        NOW,
+    )
+    for index, collector_id in enumerate(
+        ("supply_ethereum", "supply_bsc"), start=1
+    ):
+        created_at = NOW + timedelta(minutes=index)
+        await storage.insert_pending_alert_uncommitted(
+            f"rule:2:health.{collector_id}:{created_at.isoformat()}",
+            f"legacy-{collector_id}",
+            f"旧版 {collector_id} 429",
+            created_at,
+        )
+    await storage.connection.commit()
+    repository = DashboardRepository(storage.path)
+    await repository.open()
+    try:
+        alerts = (await repository.snapshot(now=NOW))["recent"]["alerts"]
+    finally:
+        await repository.close()
+
+    assert [item["content"] for item in alerts] == ["当前有效告警"]
+
+
 def test_dashboard_text_keeps_source_path_but_removes_url_secrets() -> None:
     value = (
         "来源 https://docs.example/report?id=123&token=hidden#section，请核对"

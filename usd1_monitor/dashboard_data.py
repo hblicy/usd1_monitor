@@ -378,6 +378,8 @@ class DashboardRepository:
             SELECT alert_key, content, created_at, delivered_at, status
             FROM alert_deliveries
             WHERE status != 'CANCELLED'
+              AND instr(alert_key, ':health.supply_ethereum:') = 0
+              AND instr(alert_key, ':health.supply_bsc:') = 0
             ORDER BY created_at DESC, id ASC
             LIMIT ?
             """,
