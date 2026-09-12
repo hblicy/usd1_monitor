@@ -1,7 +1,7 @@
 from datetime import date
 from pathlib import Path
 
-from usd1_monitor.config import load_config
+from usd1_monitor.config import RedemptionConfig, load_config
 
 
 HOME_DEPLOYMENT = "/home/ubuntu/usd1_monitor"
@@ -11,6 +11,7 @@ LEGACY_DEPLOYMENT_PATHS = (
     "/var/lib/usd1-monitor",
     "/var/log/usd1-monitor",
 )
+BITGO_INVESTOR_NEWS_URL = "https://investors.bitgo.com/news/default.aspx"
 
 EXPECTED_EVM_ADDRESSES = {
     "0xf977814e90da44bfa03b6295a0616a897441acec",
@@ -262,5 +263,17 @@ def test_readme_documents_core_risk_boundaries_and_rpc_budget() -> None:
         "合计约 16.85–17.41 万次/月",
         "命中可信 EVM 地址的唯一 Transfer 区块数",
         "每个相关区块只补取一次时间戳",
+        "复制完整的 `custody:` 配置段",
+        "删除 `https://investors.bitgo.com/news/default.aspx`",
     ):
         assert required in readme
+
+
+def test_redemption_defaults_and_examples_do_not_require_blocked_investor_page() -> None:
+    assert BITGO_INVESTOR_NEWS_URL not in RedemptionConfig().official_page_urls
+    for path in (
+        Path("config.example.yaml"),
+        Path("deploy/config.production.example.yaml"),
+    ):
+        config = load_config(path, environ={})
+        assert BITGO_INVESTOR_NEWS_URL not in config.redemption.official_page_urls

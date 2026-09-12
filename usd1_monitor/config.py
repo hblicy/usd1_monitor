@@ -240,7 +240,6 @@ class RedemptionConfig(StrictModel):
         default_factory=lambda: [
             "https://www.bitgo.com/usd1/",
             "https://www.bitgo.com/usd1-terms/",
-            "https://investors.bitgo.com/news/default.aspx",
             "https://docs.worldlibertyfinancial.com/resources/faq",
         ]
     )
