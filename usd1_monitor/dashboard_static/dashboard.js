@@ -8,7 +8,7 @@ const LEVELS = {
   GREEN: { label: "正常 GREEN", business: "当前未发现影响 USD1 稳定性的重大风险。", health: "监控服务和数据源运行正常。" },
   YELLOW: { label: "注意 YELLOW", business: "发现需要关注的 USD1 业务风险。", health: "部分监控项存在异常，需要持续关注。" },
   RED: { label: "异常 RED", business: "发现严重的 USD1 业务风险，请立即检查。", health: "监控服务存在严重异常，请立即检查。" },
-  UNKNOWN: { label: "未知 UNKNOWN", business: "暂无足够数据判断 USD1 风险。", health: "暂无足够数据判断监控健康状态。" },
+  UNKNOWN: { label: "未知 UNKNOWN", business: "关键风险数据暂不可用，当前无法完整判断 USD1 风险。", health: "暂无足够数据判断监控健康状态。" },
 };
 
 const METRICS = [
@@ -179,8 +179,8 @@ function unavailableMetricReason(key, metrics, generatedAt) {
   }
   if (key === "estimated_collateralization") {
     if (!completeSupplyFresh) return "等待完整多链供应量采集";
-    if (!isFreshMetric(metrics?.reserves, generatedAt)) {
-      return "等待官方储备数据更新";
+    if (metrics?.reserves?.available === false || !isFreshMetric(metrics?.reserves, generatedAt)) {
+      return "官方储备数据已过期，当前覆盖率无法判断";
     }
     return "等待下一次覆盖率计算";
   }
@@ -198,21 +198,184 @@ function renderMetrics(metrics, generatedAt) {
   for (const [key, label, kind] of METRICS) {
     const item = metrics?.[key] || null;
     const available = isAvailableMetric(key, item, metrics, generatedAt);
+    const reserveLastKnown = key === "reserves" && item?.last_known === true;
     const card = element("article", "metric-item");
     card.append(element("p", "metric-label", label));
     card.append(element(
       "p",
       "metric-value",
-      available
+      available || reserveLastKnown
         ? formatMetric(item, kind)
         : unavailableMetricReason(key, metrics, generatedAt),
     ));
     let metadata = "暂时无法计算";
-    if (available) {
+    if (reserveLastKnown) {
+      metadata = `最后已知 · ${formatTime(item.observed_at)}`;
+    } else if (available) {
       const fill = Object.hasOwn(item, "fully_fillable") ? (item.fully_fillable ? " · 可完全成交" : " · 深度不足") : "";
       metadata = `${item.quality || "质量未知"} · ${formatTime(item.observed_at)}${fill}`;
     }
     card.append(element("p", "metric-meta", metadata));
+    container.append(card);
+  }
+}
+
+function formatAmount(value, unit = "USD1") {
+  if (typeof value !== "number") return "暂无数据";
+  return `${new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 2 }).format(value)} ${unit}`;
+}
+
+function displayedBalance(item) {
+  if (item?.available && typeof item.balance === "number") {
+    return { value: item.balance, lastKnown: false };
+  }
+  if (typeof item?.last_known_balance === "number") {
+    return { value: item.last_known_balance, lastKnown: true };
+  }
+  return { value: null, lastKnown: false };
+}
+
+function renderCustodyCard(label, item) {
+  const card = element("article", "custody-card");
+  card.append(element("p", "metric-label", label));
+  const balance = displayedBalance(item);
+  card.append(element("p", "custody-value", formatAmount(balance.value)));
+  const count = Number.isInteger(item?.address_count) ? ` · ${item.address_count} 个地址` : "";
+  card.append(element("p", "metric-meta", `${balance.lastKnown ? "最后已知" : item?.available ? "当前值" : "暂无数据"}${count}`));
+  return card;
+}
+
+function flowText(item, emptyText = "正在积累数据") {
+  if (item?.available && typeof item.value === "number") return formatAmount(item.value);
+  if (typeof item?.last_known?.value === "number") return `${formatAmount(item.last_known.value)}（最后已知）`;
+  return emptyText;
+}
+
+function solanaDeltaText(item, hours) {
+  const key = `delta_${hours}h`;
+  if (typeof item?.[key] === "number") return formatAmount(item[key]);
+  const lastKnown = item?.[`${key}_last_known`];
+  if (typeof lastKnown === "number") return `${formatAmount(lastKnown)}（最后已知）`;
+  return "正在积累数据";
+}
+
+function renderCustody(custody) {
+  const data = custody || {};
+  const summary = document.getElementById("custody-summary");
+  const entities = document.getElementById("custody-entities");
+  const flows = document.getElementById("custody-flows");
+  const addresses = document.getElementById("custody-addresses");
+  clear(summary);
+  clear(entities);
+  clear(flows);
+  clear(addresses);
+
+  const share = data.available && typeof data.binance_share_lower_bound === "number"
+    ? data.binance_share_lower_bound
+    : data.last_known?.binance_share_lower_bound;
+  const verifiedBalance = data.available && typeof data.binance_verified_balance === "number"
+    ? data.binance_verified_balance
+    : data.last_known?.binance_verified_balance;
+  const heading = element("p", "custody-main-value");
+  heading.textContent = typeof share === "number"
+    ? `已核验 Binance 地址至少占比 ${new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 2 }).format(share * 100)}%`
+    : "已核验 Binance 地址至少占比：暂无数据";
+  summary.append(heading);
+  summary.append(element(
+    "p",
+    "custody-note",
+    `${data.available ? "当前已核验余额" : "最后已知，不参与当前风险判断"}：${formatAmount(verifiedBalance)}`,
+  ));
+
+  const entityLabels = [
+    ["binance_cex", "Binance CEX 已核验地址"],
+    ["binance_peg_reserve", "Binance-Peg 储备地址"],
+    ["candidate", "候选地址（不计入占比）"],
+    ["fireblocks_custody", "Fireblocks 托管"],
+    ["bitgo_issuer", "BitGo / 发行端"],
+    ["unlabeled_whale", "未标注巨鲸"],
+  ];
+  for (const [key, label] of entityLabels) {
+    entities.append(renderCustodyCard(label, data.entities?.[key]));
+  }
+
+  const flowCards = [
+    ["Binance 地址组 24 小时净变化", flowText(data.binance_net_change_24h), ""],
+    ["最大单地址 1 小时组外流出", flowText(data.largest_address_outflow_1h), data.largest_address_outflow_1h?.label || data.largest_address_outflow_1h?.scope || ""],
+    ["Solana 1 小时净余额变化", solanaDeltaText(data.solana, 1), "净余额变化，非交易对手归因"],
+    ["Solana 24 小时净余额变化", solanaDeltaText(data.solana, 24), "净余额变化，非交易对手归因"],
+  ];
+  for (const [label, value, detail] of flowCards) {
+    const card = element("article", "custody-card");
+    card.append(element("p", "metric-label", label));
+    card.append(element("p", "custody-value", value));
+    if (detail) card.append(element("p", "metric-meta", detail));
+    flows.append(card);
+  }
+
+  const rows = Array.isArray(data.addresses) ? data.addresses : [];
+  if (rows.length === 0) {
+    addresses.append(element("p", "empty-copy", "暂无托管地址快照"));
+    return;
+  }
+  for (const item of rows) {
+    const card = element("article", "address-card");
+    const title = element("div", "address-title");
+    title.append(element("strong", "", item.label || "未命名地址"));
+    title.append(element("span", `trust-badge ${item.status === "trusted" ? "trusted" : "candidate"}`, item.status === "trusted" ? "已核验" : "候选"));
+    card.append(title);
+    card.append(element("p", "address-value", `${item.chain || "未知网络"} · ${item.address || "地址未知"}`));
+    const balance = item.available ? item.balance : item.last_known_balance;
+    card.append(element("p", "address-balance", `${item.available ? "余额" : "最后已知余额"}：${formatAmount(balance)}`));
+    card.append(element("p", "metric-meta", `核验日期：${item.verified_on || "未核验"} · 数据时间：${formatTime(item.observed_at)}`));
+    const evidence = element("div", "evidence-links");
+    for (const [index, value] of (Array.isArray(item.evidence_urls) ? item.evidence_urls : []).entries()) {
+      const link = safeLink(value, `核验证据 ${index + 1}`);
+      if (link) evidence.append(link);
+    }
+    if (evidence.childElementCount > 0) card.append(evidence);
+    addresses.append(card);
+  }
+}
+
+function renderRedemption(redemption) {
+  const data = redemption || {};
+  const container = document.getElementById("redemption-content");
+  clear(container);
+  const panel = element("article", "redemption-state");
+  panel.dataset.level = data.available ? (data.level || "UNKNOWN") : "UNKNOWN";
+  const summary = data.summary || (data.available && data.level === "GREEN"
+    ? "未发现官方限制"
+    : "官方赎回通道数据暂不可用");
+  panel.append(element("p", "redemption-summary", summary));
+  if (data.available) {
+    panel.append(element("p", "metric-meta", `官方状态检查时间：${formatTime(data.observed_at)}`));
+    const link = safeLink(data.source_url, "查看官方来源");
+    if (link) panel.append(link);
+  } else if (data.last_known) {
+    panel.append(element("p", "redemption-last-known", `最后已知：${data.last_known.summary || "状态未知"}`));
+    panel.append(element("p", "metric-meta", `最后已知时间：${formatTime(data.last_known.observed_at)}`));
+    const link = safeLink(data.last_known.source_url, "查看最后已知官方来源");
+    if (link) panel.append(link);
+  }
+  container.append(panel);
+}
+
+function renderUnverifiedLeads(items) {
+  const container = document.getElementById("unverified-lead-list");
+  clear(container);
+  if (!Array.isArray(items) || items.length === 0) {
+    container.append(element("p", "empty-copy", "暂无待核实媒体线索"));
+    return;
+  }
+  for (const item of items) {
+    const card = element("article", "lead-card");
+    card.append(element("p", "lead-title", item.title || "未命名媒体线索"));
+    if (item.summary) card.append(element("p", "lead-summary", item.summary));
+    const publisher = item.publisher ? ` · ${item.publisher}` : "";
+    card.append(element("p", "metric-meta", `未核验媒体线索${publisher} · ${formatTime(item.published_at || item.first_seen_at)}`));
+    const link = safeLink(item.url, "查看媒体原文");
+    if (link) card.append(link);
     container.append(card);
   }
 }
@@ -290,6 +453,9 @@ function renderSnapshot(snapshot) {
   renderStatus("health", snapshot.health);
   renderActiveRisks(snapshot);
   renderMetrics(snapshot.metrics, snapshot.generated_at);
+  renderCustody(snapshot.custody);
+  renderRedemption(snapshot.redemption);
+  renderUnverifiedLeads(snapshot.recent?.unverified_leads || []);
   renderCollectors(snapshot.health?.collectors || []);
   renderAlerts(snapshot.recent?.alerts || []);
   renderChainEvents(snapshot.recent?.chain_events || []);
@@ -306,6 +472,9 @@ function renderUnavailable() {
   document.getElementById("last-updated").textContent = "数据暂时无法读取";
   renderActiveRisks({ business: { level: "UNKNOWN", items: [] }, health: { level: "UNKNOWN", items: [] } });
   renderMetrics({}, null);
+  renderCustody(null);
+  renderRedemption(null);
+  renderUnverifiedLeads([]);
   renderCollectors([]);
   renderAlerts([]);
   renderChainEvents([]);
