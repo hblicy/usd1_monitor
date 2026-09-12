@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import sys
 from collections.abc import Awaitable, Callable, Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
 
@@ -21,6 +22,12 @@ from usd1_monitor.collectors.announcements import (
     parse_wlfi_items,
 )
 from usd1_monitor.collectors.market import BinanceMarketCollector
+from usd1_monitor.collectors.custody import CustodyBalanceCollector
+from usd1_monitor.collectors.redemption import (
+    BitGoStatusCollector,
+    MediaRedemptionRssCollector,
+    OfficialRedemptionPageCollector,
+)
 from usd1_monitor.collectors.reserves import PorCollector
 from usd1_monitor.collectors.supply import (
     DefiLlamaSupplyCollector,
@@ -41,17 +48,24 @@ from usd1_monitor.rpc import JsonRpcClient
 from usd1_monitor.scheduler import (
     CombinedSupplySource,
     ConfirmedPorSource,
+    CustodyConcentrationMonitor,
     EvmChainMonitor,
     InformationMonitor,
     MarketMonitor,
     NOT_MONITORED,
     ReserveSupplyMonitor,
+    RedemptionChannelMonitor,
     Usd1Monitor,
 )
 from usd1_monitor.engine.aggregate import (
     business_overall,
     health_overall,
     is_monitoring_health_rule,
+)
+from usd1_monitor.engine.asset_assessment import (
+    POR_COVERAGE_MAX_AGE_SECONDS,
+    assess_asset,
+    pillar_from_observations,
 )
 from usd1_monitor.models import RiskLevel
 from usd1_monitor.time_utils import local_iso
@@ -167,6 +181,7 @@ def build_market_monitor(
         )
         for chain_name in EVM_CHAIN_IDS
     ]
+    solana_rpc = JsonRpcClient(multichain_config.solana_rpc_urls, http)
     multichain = MultichainSupplySource(
         [
             *evm_supply_collectors,
@@ -175,7 +190,7 @@ def build_market_monitor(
                 multichain_config.tron_rpc_urls,
             ),
             SolanaSupplyCollector(
-                JsonRpcClient(multichain_config.solana_rpc_urls, http)
+                solana_rpc
             ),
             AptosSupplyCollector(
                 http,
@@ -247,6 +262,46 @@ def build_market_monitor(
             for source in official_sources
         },
     )
+    custody = (
+        CustodyConcentrationMonitor(
+            CustodyBalanceCollector(
+                {
+                    "ethereum": rpc_by_chain["ethereum"],
+                    "bsc": rpc_by_chain["bsc"],
+                },
+                solana_rpc,
+                interval_seconds=config.custody.interval_seconds,
+            ),
+            storage,
+            config.custody,
+            confirmation_depths={
+                "ethereum": config.chains.ethereum.confirmation_depth,
+                "bsc": config.chains.bsc.confirmation_depth,
+            },
+            evm_rpcs={
+                "ethereum": rpc_by_chain["ethereum"],
+                "bsc": rpc_by_chain["bsc"],
+            },
+            timezone_name=config.timezone,
+        )
+        if config.custody.addresses
+        else None
+    )
+    redemption = RedemptionChannelMonitor(
+        BitGoStatusCollector(http, config.redemption.status_url),
+        [
+            OfficialRedemptionPageCollector(
+                f"redemption_page_{index}", url, http
+            )
+            for index, url in enumerate(config.redemption.official_page_urls)
+        ],
+        [
+            MediaRedemptionRssCollector(http, url)
+            for url in config.redemption.media_rss_urls
+        ],
+        storage,
+        config.redemption,
+    )
     return (
         Usd1Monitor(
             market,
@@ -256,6 +311,8 @@ def build_market_monitor(
             interval_seconds=config.market.interval_seconds,
             reserve_supply=reserve_supply,
             information=information,
+            custody=custody,
+            redemption=redemption,
             retention_days=config.retention_days,
         ),
         http,
@@ -308,7 +365,11 @@ async def async_main(
     resource: Closable | None = None
     try:
         if args.command == "status":
-            await _print_status(storage, timezone_name=config.timezone)
+            await _print_status(
+                storage,
+                timezone_name=config.timezone,
+                coverage_max_age_seconds=config.por.coverage_max_age_seconds,
+            )
             return 0
 
         builder = monitor_builder or build_market_monitor
@@ -330,8 +391,13 @@ async def async_main(
 
 
 async def _print_status(
-    storage: Storage, *, timezone_name: str = "Asia/Shanghai"
+    storage: Storage,
+    *,
+    timezone_name: str = "Asia/Shanghai",
+    now: datetime | None = None,
+    coverage_max_age_seconds: int = POR_COVERAGE_MAX_AGE_SECONDS,
 ) -> None:
+    current_time = now or datetime.now(UTC)
     states = await storage.list_risk_states()
     business_states = [
         state for state in states if not is_monitoring_health_rule(state.rule_id)
@@ -340,13 +406,25 @@ async def _print_status(
         state for state in states if is_monitoring_health_rule(state.rule_id)
     ]
     failed_alerts = await storage.failed_alerts()
-    business_level = (
+    pillars = pillar_from_observations(
+        now=current_time,
+        coverage_max_age_seconds=coverage_max_age_seconds,
+        concentration=await storage.latest_observation(
+            "custody.binance_share_lower_bound", "global"
+        ),
+        reserves=await storage.latest_observation("por.reserves", "ethereum"),
+        supply=await storage.latest_observation("supply.multichain_total", "global"),
+        redemption=await storage.latest_observation(
+            "redemption.channel_status", "global"
+        ),
+    )
+    business_level = assess_asset(
         business_overall(
             business_states,
+            now=current_time,
             event_active_seconds=storage.event_active_seconds,
-        ).name
-        if business_states
-        else "UNKNOWN"
+        ),
+        pillars,
     )
     if health_states:
         monitor_health = health_overall(health_states)
@@ -355,7 +433,14 @@ async def _print_status(
         health_level = monitor_health.name
     else:
         health_level = "YELLOW" if failed_alerts else "UNKNOWN"
-    print(f"business_overall: {business_level}")
+    print(f"business_overall: {business_level.level.name}")
+    print(
+        "missing_pillars: "
+        + (
+            ",".join(pillar.name for pillar in business_level.missing_pillars)
+            or "-"
+        )
+    )
     print(f"monitor_health: {health_level}")
     print(f"failed_alerts: {len(failed_alerts)}")
     for item in states:
@@ -398,9 +483,15 @@ async def _print_status(
         ("supply.global", "global"),
         ("supply.estimated_collateralization", "global"),
     )
+    coverage_available = next(
+        pillar.available for pillar in pillars if pillar.name == "coverage"
+    )
     for metric, scope in monitored_metrics:
         observation = await storage.latest_observation(metric, scope)
-        if observation is None:
+        if observation is None or (
+            metric == "supply.estimated_collateralization"
+            and not coverage_available
+        ):
             print(f"metric {metric}: UNKNOWN scope={scope}")
         else:
             print(

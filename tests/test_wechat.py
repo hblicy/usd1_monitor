@@ -65,6 +65,7 @@ def transition(
     current: RiskLevel,
     *,
     cause_id: str | None = None,
+    evidence: dict[str, object] | None = None,
 ) -> RiskTransition:
     return RiskTransition(
         rule_id=rule_id,
@@ -72,7 +73,9 @@ def transition(
         current=current,
         changed_at=NOW,
         first_triggered_at=NOW,
-        evidence={
+        evidence=evidence
+        if evidence is not None
+        else {
             "current": 0.996,
             "threshold": 0.997,
             "data_time": NOW.isoformat(),
@@ -107,6 +110,211 @@ def test_alert_message_uses_plain_chinese_summary() -> None:
         "](",
     ):
         assert hidden not in content
+
+
+def test_custody_concentration_message_is_plain_and_explains_lower_bound() -> None:
+    content = format_transitions(
+        [
+            transition(
+                "custody.binance_concentration",
+                RiskLevel.GREEN,
+                RiskLevel.RED,
+                evidence={
+                    "share": 0.71,
+                    "verified_balance": 3_000_000_000,
+                    "data_time": NOW.isoformat(),
+                    "source_urls": [
+                        "https://www.binance.com/en/square/post/97671"
+                    ],
+                },
+            )
+        ],
+        overall_level=RiskLevel.RED,
+        timezone_name="Asia/Shanghai",
+    )
+
+    assert "已核验 Binance 地址至少占全网供应量 71%" in content
+    assert "已核验余额：30 亿 USD1" in content
+    assert "https://www.binance.com/en/square/post/97671" in content
+    for hidden in (
+        "custody.binance_concentration",
+        "rule_id",
+        "verified_balance",
+        "source_urls",
+        "**",
+        "- ",
+    ):
+        assert hidden not in content
+
+
+@pytest.mark.parametrize(
+    ("rule_id", "evidence", "expected"),
+    (
+        (
+            "custody.binance_flow_24h",
+            {
+                "value": 60_000_000,
+                "chain": "ethereum",
+                "label": "Binance 已核验地址组",
+                "data_time": NOW.isoformat(),
+            },
+            "Ethereum Binance 已核验地址组 24 小时净流入 6000 万 USD1",
+        ),
+        (
+            "custody.address_outflow_1h",
+            {
+                "values": {"bsc:0x1234": 120_000_000},
+                "labels": {"bsc:0x1234": "Binance Hot Wallet"},
+                "data_time": NOW.isoformat(),
+            },
+            "BNB Chain Binance Hot Wallet 1 小时净流出 1.2 亿 USD1",
+        ),
+        (
+            "custody.binance_flow_24h",
+            {
+                "value": -55_000_000,
+                "chain": "solana",
+                "label": "Binance 2",
+                "data_time": NOW.isoformat(),
+            },
+            "Solana Binance 2 24 小时余额减少 5500 万 USD1",
+        ),
+    ),
+)
+def test_custody_flow_messages_explain_chain_label_amount_and_window(
+    rule_id: str, evidence: dict[str, object], expected: str
+) -> None:
+    content = format_transitions(
+        [transition(rule_id, RiskLevel.GREEN, RiskLevel.YELLOW, evidence=evidence)]
+    )
+
+    assert expected in content
+    for hidden in (rule_id, "rule_id", "values", "labels", "**", "- "):
+        assert hidden not in content
+
+
+def test_business_alert_without_source_points_to_dashboard() -> None:
+    content = format_transitions(
+        [
+            transition(
+                "custody.binance_flow_24h",
+                RiskLevel.GREEN,
+                RiskLevel.YELLOW,
+                evidence={
+                    "value": 60_000_000,
+                    "chains": ["ethereum"],
+                    "labels": ["Binance ETH"],
+                    "data_time": NOW.isoformat(),
+                },
+            )
+        ]
+    )
+
+    assert "信息来源：" not in content
+    assert "建议：请打开监控面板查看详情。" in content
+    assert "请打开信息来源" not in content
+
+
+def test_custody_flow_messages_degrade_safely_without_context() -> None:
+    entity_message = format_transitions(
+        [
+            transition(
+                "custody.binance_flow_24h",
+                RiskLevel.GREEN,
+                RiskLevel.YELLOW,
+                evidence={
+                    "value": -60_000_000,
+                    "data_time": NOW.isoformat(),
+                },
+            )
+        ]
+    )
+    address_message = format_transitions(
+        [
+            transition(
+                "custody.address_outflow_1h",
+                RiskLevel.GREEN,
+                RiskLevel.YELLOW,
+                evidence={
+                    "values": {"ethereum:0x1234": 120_000_000},
+                    "data_time": NOW.isoformat(),
+                },
+            )
+        ]
+    )
+
+    assert "相关链上 已核验 Binance 地址组 24 小时净流出 6000 万 USD1" in entity_message
+    assert "Ethereum 已核验地址 0x1234 1 小时净流出 1.2 亿 USD1" in address_message
+
+
+@pytest.mark.parametrize(
+    ("rule_id", "expected"),
+    (
+        ("custody.binance_concentration", "集中度已回到预警线内"),
+        ("custody.binance_flow_24h", "大额资金变化已结束"),
+        ("custody.address_outflow_1h", "大额资金变化已结束"),
+        ("redemption.channel", "官方赎回限制已解除"),
+    ),
+)
+def test_core_asset_recovery_messages_are_specific(
+    rule_id: str, expected: str
+) -> None:
+    content = format_transitions(
+        [
+            transition(
+                rule_id,
+                RiskLevel.YELLOW,
+                RiskLevel.GREEN,
+                evidence={"data_time": NOW.isoformat()},
+            )
+        ]
+    )
+
+    assert f"发生了什么：{expected}" in content
+    assert rule_id not in content
+
+
+def test_redemption_message_uses_chinese_summary_and_official_source() -> None:
+    content = format_transitions(
+        [
+            transition(
+                "redemption.channel",
+                RiskLevel.GREEN,
+                RiskLevel.RED,
+                evidence={
+                    "summary": "USD1 官方赎回已暂停或不可用",
+                    "data_time": NOW.isoformat(),
+                    "source_url": "https://www.bitgo.com/usd1/",
+                },
+            )
+        ]
+    )
+
+    assert "发生了什么：USD1 官方赎回已暂停或不可用" in content
+    assert "信息来源：\nhttps://www.bitgo.com/usd1/" in content
+    assert "redemption.channel" not in content
+
+
+def test_generic_bitgo_incident_says_not_confirmed() -> None:
+    content = format_transitions(
+        [
+            transition(
+                "redemption.channel",
+                RiskLevel.GREEN,
+                RiskLevel.YELLOW,
+                evidence={
+                    "summary": "BitGo Stablecoins 服务异常，可能影响 USD1，尚未确认",
+                    "data_time": NOW.isoformat(),
+                    "source_url": "https://status.bitgo.com/",
+                },
+            )
+        ],
+        overall_level=RiskLevel.YELLOW,
+        timezone_name="Asia/Shanghai",
+    )
+
+    assert "可能影响 USD1，尚未确认" in content
+    assert "https://status.bitgo.com/" in content
 
 
 def test_alert_message_renders_all_source_urls() -> None:

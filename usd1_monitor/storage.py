@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import json
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -108,6 +109,23 @@ CREATE TABLE IF NOT EXISTS chain_block_hashes (
     PRIMARY KEY(chain, block_number)
 );
 """
+
+
+class StorageError(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        chain: str,
+        block_number: int,
+        tx_hash: str,
+        log_index: int,
+    ) -> None:
+        super().__init__(message)
+        self.chain = chain
+        self.block_number = block_number
+        self.tx_hash = tx_hash
+        self.log_index = log_index
 
 
 def serialized_write(method):
@@ -250,6 +268,45 @@ class Storage:
             LIMIT ?
             """,
             (metric, limit),
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+        return [
+            Observation(
+                metric=row["metric"],
+                source=row["source"],
+                scope=row["scope"],
+                value=row["value"],
+                unit=row["unit"],
+                observed_at=datetime.fromisoformat(row["observed_at"]),
+                collected_at=datetime.fromisoformat(row["collected_at"]),
+                quality=row["quality"],
+                metadata=json.loads(row["metadata_json"]),
+            )
+            for row in rows
+        ]
+
+    async def latest_observations_by_scope(
+        self, metric: str
+    ) -> list[Observation]:
+        cursor = await self.connection.execute(
+            """
+            SELECT metric, source, scope, value, unit, observed_at,
+                   collected_at, quality, metadata_json
+            FROM (
+                SELECT metric, source, scope, value, unit, observed_at,
+                       collected_at, quality, metadata_json,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY scope
+                           ORDER BY observed_at DESC, id DESC
+                       ) AS row_number
+                FROM observations
+                WHERE metric = ?
+            )
+            WHERE row_number = 1
+            ORDER BY scope
+            """,
+            (metric,),
         )
         rows = await cursor.fetchall()
         await cursor.close()
@@ -777,7 +834,14 @@ class Storage:
     @serialized_write
     async def prune_observations(self, cutoff: datetime) -> int:
         cursor = await self.connection.execute(
-            "DELETE FROM observations WHERE observed_at < ?",
+            """
+            DELETE FROM observations
+            WHERE observed_at < ?
+              AND metric NOT IN (
+                  'custody.flow_start_block',
+                  'custody.flow_coverage_start'
+              )
+            """,
             (cutoff.isoformat(),),
         )
         await self.connection.commit()
@@ -1082,6 +1146,214 @@ class Storage:
         await cursor.close()
         return [self._chain_event_from_row(row) for row in rows]
 
+    async def unstamped_transfer_blocks(
+        self,
+        chain: str,
+        addresses: set[str],
+        *,
+        min_block: int,
+    ) -> list[int]:
+        if not addresses:
+            return []
+        rows = await self._relevant_transfer_rows(
+            chain, addresses, min_block=min_block
+        )
+        blocks: set[int] = set()
+        for row in rows:
+            try:
+                block_time = self._transfer_block_time(row)
+            except StorageError:
+                block_time = None
+            if block_time is None:
+                blocks.add(int(row["block_number"]))
+        return sorted(blocks)
+
+    async def custody_transfers_since(
+        self,
+        chain: str,
+        since: datetime,
+        addresses: set[str],
+    ) -> list[ChainEvent]:
+        if since.tzinfo is None or since.utcoffset() is None:
+            raise ValueError("since must be timezone-aware")
+        if not addresses:
+            return []
+        since_utc = since.astimezone(UTC)
+        rows = await self._relevant_transfer_rows(chain, addresses)
+        events: list[ChainEvent] = []
+        for row in rows:
+            block_time = self._transfer_block_time(row)
+            if block_time is not None and block_time >= since_utc:
+                events.append(self._chain_event_from_row(row))
+        return events
+
+    async def _relevant_transfer_rows(
+        self,
+        chain: str,
+        addresses: set[str],
+        *,
+        min_block: int | None = None,
+    ) -> list[aiosqlite.Row]:
+        values = tuple(sorted({item.casefold() for item in addresses}))
+        placeholders = ", ".join("?" for _ in values)
+        block_filter = ""
+        scope_params: tuple[object, ...] = (chain,)
+        if min_block is not None:
+            block_filter = " AND block_number >= ?"
+            scope_params = (chain, min_block)
+
+        cursor = await self.connection.execute(
+            f"""
+            SELECT chain, block_number, tx_hash, log_index, payload_json
+            FROM chain_events
+            WHERE chain = ? AND event_type = 'TRANSFER'{block_filter}
+              AND (
+                  json_valid(payload_json) = 0
+                  OR json_type(
+                      CASE WHEN json_valid(payload_json)
+                           THEN payload_json ELSE '{{}}' END
+                  ) <> 'object'
+              )
+            ORDER BY block_number, log_index, id
+            LIMIT 1
+            """,
+            scope_params,
+        )
+        invalid = await cursor.fetchone()
+        await cursor.close()
+        if invalid is not None:
+            raise self._transfer_storage_error(
+                invalid, "Transfer payload JSON is invalid"
+            )
+
+        cursor = await self.connection.execute(
+            f"""
+            SELECT chain, block_number, tx_hash, log_index, event_type,
+                   payload_json, observed_at
+            FROM chain_events
+            WHERE chain = ? AND event_type = 'TRANSFER'{block_filter}
+              AND (
+                  lower(json_extract(
+                      CASE WHEN json_valid(payload_json)
+                           THEN payload_json ELSE '{{}}' END,
+                      '$.from_address'
+                  ))
+                      IN ({placeholders})
+                  OR lower(json_extract(
+                      CASE WHEN json_valid(payload_json)
+                           THEN payload_json ELSE '{{}}' END,
+                      '$.to_address'
+                  ))
+                      IN ({placeholders})
+              )
+            ORDER BY block_number, log_index, id
+            """,
+            (*scope_params, *values, *values),
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+        return rows
+
+    @classmethod
+    def _transfer_block_time(cls, row: aiosqlite.Row) -> datetime | None:
+        try:
+            payload = json.loads(row["payload_json"])
+        except (json.JSONDecodeError, TypeError) as exc:
+            raise cls._transfer_storage_error(
+                row, "Transfer payload JSON is invalid"
+            ) from exc
+        if not isinstance(payload, dict):
+            raise cls._transfer_storage_error(
+                row, "Transfer payload JSON is not an object"
+            )
+        raw = payload.get("block_time")
+        if raw is None:
+            return None
+        if not isinstance(raw, str):
+            raise cls._transfer_storage_error(
+                row, "Transfer block_time is not an ISO datetime string"
+            )
+        try:
+            parsed = datetime.fromisoformat(raw)
+            if parsed.tzinfo is None or parsed.utcoffset() is None:
+                raise cls._transfer_storage_error(
+                    row, "Transfer block_time must be timezone-aware"
+                )
+            normalized = parsed.astimezone(UTC)
+        except OverflowError as exc:
+            raise cls._transfer_storage_error(
+                row, "Transfer block_time cannot be normalized to UTC"
+            ) from exc
+        except ValueError as exc:
+            raise cls._transfer_storage_error(
+                row, "Transfer block_time is not a valid ISO datetime"
+            ) from exc
+        return normalized
+
+    @staticmethod
+    def _transfer_storage_error(
+        row: aiosqlite.Row, detail: str
+    ) -> StorageError:
+        chain = str(row["chain"])
+        block_number = int(row["block_number"])
+        tx_hash = str(row["tx_hash"])
+        log_index = int(row["log_index"])
+        return StorageError(
+            f"{chain} block {block_number} tx {tx_hash} log_index "
+            f"{log_index}: {detail}",
+            chain=chain,
+            block_number=block_number,
+            tx_hash=tx_hash,
+            log_index=log_index,
+        )
+
+    @serialized_write
+    async def set_transfer_block_time(
+        self,
+        chain: str,
+        block_number: int,
+        block_time: datetime,
+    ) -> None:
+        if block_time.tzinfo is None or block_time.utcoffset() is None:
+            raise ValueError("block_time must be timezone-aware")
+        block_time_iso = block_time.astimezone(UTC).isoformat()
+        await self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            cursor = await self.connection.execute(
+                """
+                SELECT id, chain, block_number, tx_hash, log_index,
+                       payload_json
+                FROM chain_events
+                WHERE chain = ? AND block_number = ?
+                  AND event_type = 'TRANSFER'
+                ORDER BY id
+                """,
+                (chain, block_number),
+            )
+            rows = await cursor.fetchall()
+            await cursor.close()
+            updates: list[tuple[str, int]] = []
+            for row in rows:
+                try:
+                    payload = json.loads(row["payload_json"])
+                    if not isinstance(payload, dict):
+                        raise TypeError("payload must be a JSON object")
+                except (json.JSONDecodeError, TypeError) as exc:
+                    raise self._transfer_storage_error(
+                        row, "Transfer payload JSON is invalid"
+                    ) from exc
+                payload["block_time"] = block_time_iso
+                updates.append((json.dumps(payload, sort_keys=True), row["id"]))
+            if updates:
+                await self.connection.executemany(
+                    "UPDATE chain_events SET payload_json = ? WHERE id = ?",
+                    updates,
+                )
+            await self.connection.commit()
+        except BaseException:
+            await self.connection.rollback()
+            raise
+
     async def delete_evm_observations_from_uncommitted(
         self, chain: str, block_number: int
     ) -> None:
@@ -1125,6 +1397,84 @@ class Storage:
             LIMIT 1
             """,
             (metric, scope),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        if row is None:
+            return None
+        return Observation(
+            metric=row["metric"],
+            source=row["source"],
+            scope=row["scope"],
+            value=row["value"],
+            unit=row["unit"],
+            observed_at=datetime.fromisoformat(row["observed_at"]),
+            collected_at=datetime.fromisoformat(row["collected_at"]),
+            quality=row["quality"],
+            metadata=json.loads(row["metadata_json"]),
+        )
+
+    async def nearest_fact_observation(
+        self,
+        metric: str,
+        scope: str,
+        observed_at: datetime,
+        *,
+        max_distance_seconds: int,
+        before_observed_at: datetime | None = None,
+        metadata_equals: Mapping[str, object] | None = None,
+    ) -> Observation | None:
+        if observed_at.tzinfo is None or observed_at.utcoffset() is None:
+            raise ValueError("observed_at must be timezone-aware")
+        if (
+            isinstance(max_distance_seconds, bool)
+            or not isinstance(max_distance_seconds, int)
+            or max_distance_seconds < 0
+        ):
+            raise ValueError("max_distance_seconds must be a non-negative integer")
+        target = observed_at.astimezone(UTC)
+        lower = target - timedelta(seconds=max_distance_seconds)
+        upper = target + timedelta(seconds=max_distance_seconds)
+        conditions = [
+            "metric = ?",
+            "scope = ?",
+            "quality = 'FACT'",
+            "julianday(observed_at) BETWEEN julianday(?) AND julianday(?)",
+        ]
+        parameters: list[object] = [
+            metric,
+            scope,
+            lower.isoformat(),
+            upper.isoformat(),
+        ]
+        if before_observed_at is not None:
+            if (
+                before_observed_at.tzinfo is None
+                or before_observed_at.utcoffset() is None
+            ):
+                raise ValueError("before_observed_at must be timezone-aware")
+            conditions.append("julianday(observed_at) < julianday(?)")
+            parameters.append(before_observed_at.astimezone(UTC).isoformat())
+        for key, value in sorted((metadata_equals or {}).items()):
+            conditions.append("json_extract(metadata_json, ?) = ?")
+            parameters.extend((f"$.{key}", value))
+        parameters.append(target.isoformat())
+        cursor = await self.connection.execute(
+            f"""
+            SELECT id, metric, source, scope, value, unit, observed_at,
+                   collected_at, quality, metadata_json
+            FROM observations
+            WHERE {' AND '.join(conditions)}
+            ORDER BY
+                ROUND(
+                    ABS((julianday(observed_at) - julianday(?)) * 86400.0),
+                    3
+                ) ASC,
+                unixepoch(observed_at) DESC,
+                id DESC
+            LIMIT 1
+            """,
+            parameters,
         )
         row = await cursor.fetchone()
         await cursor.close()
@@ -1274,6 +1624,42 @@ class Storage:
             if json.loads(row["metadata_json"]).get("scan_error")
         }
 
+    async def get_announcement(
+        self, source: str, stable_id: str
+    ) -> Announcement | None:
+        cursor = await self.connection.execute(
+            """
+            SELECT source, stable_id, title, url, published_at, body_hash,
+                   first_seen_at, metadata_json
+            FROM announcements
+            WHERE source = ? AND stable_id = ?
+            """,
+            (source, stable_id),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        return self._announcement_from_row(row) if row is not None else None
+
+    async def announcements_for_sources(
+        self, sources: tuple[str, ...]
+    ) -> list[Announcement]:
+        if not sources:
+            return []
+        placeholders = ",".join("?" for _ in sources)
+        cursor = await self.connection.execute(
+            f"""
+            SELECT source, stable_id, title, url, published_at, body_hash,
+                   first_seen_at, metadata_json
+            FROM announcements
+            WHERE source IN ({placeholders})
+            ORDER BY COALESCE(published_at, first_seen_at), id
+            """,
+            sources,
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+        return [self._announcement_from_row(row) for row in rows]
+
     async def latest_announcement(self, source: str) -> Announcement | None:
         cursor = await self.connection.execute(
             """
@@ -1295,6 +1681,10 @@ class Storage:
         await cursor.close()
         if row is None:
             return None
+        return self._announcement_from_row(row)
+
+    @staticmethod
+    def _announcement_from_row(row: aiosqlite.Row) -> Announcement:
         return Announcement(
             source=row["source"],
             stable_id=row["stable_id"],

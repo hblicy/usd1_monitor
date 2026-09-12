@@ -1,10 +1,12 @@
 import asyncio
+import json
 import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
+from usd1_monitor import storage as storage_module
 from usd1_monitor.engine.state import StateEngine
 from usd1_monitor.models import (
     Announcement,
@@ -14,6 +16,38 @@ from usd1_monitor.models import (
     RuleEvaluation,
 )
 from usd1_monitor.storage import Storage
+
+
+TRANSFER_FROM = "0x" + "aa" * 20
+TRANSFER_TO = "0x" + "bb" * 20
+
+
+def _transfer_event(
+    chain: str,
+    block_number: int,
+    sender: str = TRANSFER_FROM,
+    receiver: str = TRANSFER_TO,
+    *,
+    log_index: int = 0,
+    event_type: str = "TRANSFER",
+    payload_extra: dict[str, object] | None = None,
+) -> ChainEvent:
+    payload: dict[str, object] = {
+        "from_address": sender,
+        "to_address": receiver,
+        "amount": 1.0,
+    }
+    if payload_extra:
+        payload.update(payload_extra)
+    return ChainEvent(
+        chain,
+        block_number,
+        f"0x{block_number:062x}{log_index:02x}",
+        log_index,
+        event_type,
+        payload,
+        datetime(2026, 9, 11, tzinfo=UTC),
+    )
 
 
 @pytest.mark.asyncio
@@ -186,6 +220,165 @@ async def test_prune_observations_keeps_risk_history(tmp_path: Path) -> None:
     assert await storage.get_risk_state("market.price") is not None
     assert await storage.get_risk_state("event.evm.ethereum.0xold:0") is None
     await storage.close()
+
+
+@pytest.mark.asyncio
+async def test_prune_observations_keeps_custody_flow_markers(storage) -> None:
+    old_time = datetime(2025, 1, 1, tzinfo=UTC)
+    for metric in ("custody.flow_start_block", "custody.flow_coverage_start"):
+        await storage.insert_observation(
+            Observation(
+                metric,
+                "custody",
+                "ethereum",
+                100,
+                "block",
+                old_time,
+                old_time,
+            )
+        )
+
+    assert await storage.prune_observations(
+        datetime(2026, 7, 1, tzinfo=UTC)
+    ) == 0
+    assert await storage.latest_observation(
+        "custody.flow_start_block", "ethereum"
+    ) is not None
+    assert await storage.latest_observation(
+        "custody.flow_coverage_start", "ethereum"
+    ) is not None
+
+
+@pytest.mark.asyncio
+async def test_nearest_fact_observation_accepts_snapshot_after_boundary(storage) -> None:
+    boundary = datetime(2026, 9, 11, 4, tzinfo=UTC)
+    after = boundary + timedelta(minutes=10)
+    await storage.insert_observation(
+        Observation(
+            "custody.address_balance",
+            "solana_rpc",
+            "solana:owner",
+            7,
+            "USD1",
+            after,
+            after,
+        )
+    )
+
+    result = await storage.nearest_fact_observation(
+        "custody.address_balance",
+        "solana:owner",
+        datetime.fromisoformat("2026-09-11T12:00:00+08:00"),
+        max_distance_seconds=1200,
+    )
+
+    assert result is not None and result.observed_at == after
+
+
+@pytest.mark.asyncio
+async def test_nearest_fact_observation_tie_prefers_later_then_latest_id(storage) -> None:
+    boundary = datetime(2026, 9, 11, 4, tzinfo=UTC)
+    before = boundary - timedelta(minutes=5)
+    after = boundary + timedelta(minutes=5)
+    for value, observed_at in ((1, before), (2, after), (3, after)):
+        await storage.insert_observation(
+            Observation(
+                "custody.address_balance",
+                "solana_rpc",
+                "solana:owner",
+                value,
+                "USD1",
+                observed_at,
+                observed_at,
+            )
+        )
+
+    result = await storage.nearest_fact_observation(
+        "custody.address_balance",
+        "solana:owner",
+        boundary,
+        max_distance_seconds=1200,
+    )
+
+    assert result is not None and result.value == 3
+
+
+@pytest.mark.asyncio
+async def test_nearest_fact_observation_rejects_non_fact_and_both_window_sides(
+    storage,
+) -> None:
+    boundary = datetime(2026, 9, 11, 4, tzinfo=UTC)
+    for value, observed_at, quality in (
+        (1, boundary - timedelta(seconds=1201), "FACT"),
+        (2, boundary + timedelta(seconds=1201), "FACT"),
+        (3, boundary, "ESTIMATED"),
+    ):
+        await storage.insert_observation(
+            Observation(
+                "custody.address_balance",
+                "solana_rpc",
+                "solana:owner",
+                value,
+                "USD1",
+                observed_at,
+                observed_at,
+                quality=quality,
+            )
+        )
+
+    assert await storage.nearest_fact_observation(
+        "custody.address_balance",
+        "solana:owner",
+        boundary,
+        max_distance_seconds=1200,
+    ) is None
+
+
+@pytest.mark.asyncio
+async def test_nearest_fact_observation_requires_aware_target(storage) -> None:
+    with pytest.raises(ValueError, match="timezone-aware"):
+        await storage.nearest_fact_observation(
+            "custody.address_balance",
+            "solana:owner",
+            datetime(2026, 9, 11, 4),
+            max_distance_seconds=1200,
+        )
+
+
+@pytest.mark.asyncio
+async def test_nearest_fact_observation_skips_candidate_and_prior_verification(
+    storage,
+) -> None:
+    boundary = datetime(2026, 9, 11, 4, tzinfo=UTC)
+    rows = (
+        (1, boundary - timedelta(minutes=10), "trusted", "2026-09-11"),
+        (2, boundary - timedelta(minutes=5), "trusted", "2026-08-01"),
+        (3, boundary - timedelta(minutes=1), "candidate", "2026-09-11"),
+    )
+    for value, observed_at, status, verified_on in rows:
+        await storage.insert_observation(
+            Observation(
+                "custody.address_balance",
+                "solana_rpc",
+                "solana:owner",
+                value,
+                "USD1",
+                observed_at,
+                observed_at,
+                metadata={"status": status, "verified_on": verified_on},
+            )
+        )
+
+    result = await storage.nearest_fact_observation(
+        "custody.address_balance",
+        "solana:owner",
+        boundary,
+        max_distance_seconds=1200,
+        before_observed_at=datetime(2026, 9, 11, 5, tzinfo=UTC),
+        metadata_equals={"status": "trusted", "verified_on": "2026-09-11"},
+    )
+
+    assert result is not None and result.value == 1
 
 
 @pytest.mark.asyncio
@@ -556,3 +749,278 @@ async def test_reorg_cancels_legacy_reorg_snapshot_alert_by_content_chain(
     assert remaining == {
         "reorg-snapshot:100:paused:2026-09-08T00:01:00+00:00"
     }
+
+
+@pytest.mark.asyncio
+async def test_unstamped_transfer_blocks_only_include_relevant_new_blocks(
+    storage,
+) -> None:
+    events = [
+        _transfer_event("ethereum", 89),
+        _transfer_event("ethereum", 90, TRANSFER_FROM.upper(), log_index=0),
+        _transfer_event(
+            "ethereum", 90, TRANSFER_FROM, "0x" + "cc" * 20, log_index=1
+        ),
+        _transfer_event(
+            "ethereum", 91, "0x" + "11" * 20, "0x" + "22" * 20
+        ),
+        _transfer_event("ethereum", 92, event_type="MINT"),
+        _transfer_event(
+            "ethereum",
+            93,
+            payload_extra={"block_time": "2026-09-11T00:00:00+00:00"},
+        ),
+        _transfer_event("bsc", 94),
+    ]
+    await storage.insert_chain_events_and_cursor("ethereum", events, 94)
+
+    assert await storage.unstamped_transfer_blocks(
+        "ethereum", {TRANSFER_FROM}, min_block=90
+    ) == [90]
+    assert await storage.unstamped_transfer_blocks(
+        "ethereum", set(), min_block=0
+    ) == []
+
+
+@pytest.mark.asyncio
+async def test_transfer_address_is_bound_as_sql_value(storage) -> None:
+    await storage.insert_chain_events_and_cursor(
+        "ethereum", [_transfer_event("ethereum", 100)], 100
+    )
+
+    injection = "0x') OR 1=1 --"
+    assert await storage.unstamped_transfer_blocks(
+        "ethereum", {injection}, min_block=0
+    ) == []
+    assert await storage.custody_transfers_since(
+        "ethereum", datetime(2026, 1, 1, tzinfo=UTC), {injection}
+    ) == []
+    assert await storage.count_chain_events() == 1
+
+
+@pytest.mark.asyncio
+async def test_set_transfer_block_time_is_atomic_scoped_and_idempotent(
+    storage,
+) -> None:
+    original = [
+        _transfer_event(
+            "ethereum", 100, log_index=0, payload_extra={"note": "keep"}
+        ),
+        _transfer_event("ethereum", 100, log_index=1, event_type="MINT"),
+        _transfer_event("bsc", 100, log_index=2),
+    ]
+    await storage.insert_chain_events_and_cursor("ethereum", original, 100)
+    local_time = datetime.fromisoformat("2026-09-11T08:00:00+08:00")
+
+    await storage.set_transfer_block_time("ethereum", 100, local_time)
+    await storage.set_transfer_block_time("ethereum", 100, local_time)
+
+    ethereum = await storage.chain_events_for_chain("ethereum")
+    assert ethereum[0].event_type == "MINT"
+    assert "block_time" not in ethereum[0].payload
+    assert ethereum[1].payload == {
+        "amount": 1.0,
+        "block_time": "2026-09-11T00:00:00+00:00",
+        "from_address": TRANSFER_FROM,
+        "note": "keep",
+        "to_address": TRANSFER_TO,
+    }
+    bsc = await storage.chain_events_for_chain("bsc")
+    assert "block_time" not in bsc[0].payload
+
+
+@pytest.mark.asyncio
+async def test_custody_transfers_since_uses_utc_boundary_and_stable_order(
+    storage,
+) -> None:
+    await storage.insert_chain_events_and_cursor(
+        "ethereum",
+        [
+            _transfer_event("ethereum", 102, log_index=2),
+            _transfer_event("ethereum", 101, log_index=1),
+            _transfer_event("ethereum", 100, log_index=0),
+            _transfer_event(
+                "ethereum",
+                103,
+                "0x" + "11" * 20,
+                "0x" + "22" * 20,
+            ),
+        ],
+        103,
+    )
+    await storage.set_transfer_block_time(
+        "ethereum", 100, datetime.fromisoformat("2026-09-11T07:59:59+08:00")
+    )
+    await storage.set_transfer_block_time(
+        "ethereum", 101, datetime.fromisoformat("2026-09-11T08:00:00+08:00")
+    )
+    await storage.set_transfer_block_time(
+        "ethereum", 102, datetime.fromisoformat("2026-09-11T00:00:01+00:00")
+    )
+
+    events = await storage.custody_transfers_since(
+        "ethereum",
+        datetime.fromisoformat("2026-09-11T08:00:00+08:00"),
+        {TRANSFER_FROM.upper()},
+    )
+
+    assert [(item.block_number, item.log_index) for item in events] == [
+        (101, 1),
+        (102, 2),
+    ]
+    assert all("block_time" in item.payload for item in events)
+    assert await storage.custody_transfers_since(
+        "ethereum", datetime(2026, 1, 1, tzinfo=UTC), set()
+    ) == []
+
+
+@pytest.mark.asyncio
+async def test_transfer_time_methods_reject_naive_datetimes(storage) -> None:
+    with pytest.raises(ValueError, match="timezone-aware"):
+        await storage.set_transfer_block_time(
+            "ethereum", 1, datetime(2026, 9, 11)
+        )
+    with pytest.raises(ValueError, match="timezone-aware"):
+        await storage.custody_transfers_since(
+            "ethereum", datetime(2026, 9, 11), {TRANSFER_FROM}
+        )
+
+
+@pytest.mark.asyncio
+async def test_transfer_queries_report_malformed_json_with_event_context(
+    storage,
+) -> None:
+    malformed = (
+        '{"from_address":"' + TRANSFER_FROM + '","block_time":'
+    )
+    await storage.connection.execute(
+        """
+        INSERT INTO chain_events (
+            chain, block_number, tx_hash, log_index, event_type,
+            payload_json, observed_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "ethereum",
+            110,
+            "0xmalformed",
+            7,
+            "TRANSFER",
+            malformed,
+            datetime(2026, 9, 11, tzinfo=UTC).isoformat(),
+        ),
+    )
+    await storage.connection.commit()
+
+    with pytest.raises(
+        storage_module.StorageError,
+        match="ethereum.*110.*0xmalformed.*7.*payload JSON",
+    ):
+        await storage.unstamped_transfer_blocks(
+            "ethereum", {TRANSFER_FROM}, min_block=100
+        )
+    with pytest.raises(
+        storage_module.StorageError,
+        match="ethereum.*110.*0xmalformed.*7.*payload JSON",
+    ):
+        await storage.custody_transfers_since(
+            "ethereum", datetime(2026, 1, 1, tzinfo=UTC), {TRANSFER_FROM}
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("block_time", [123, True, "not-an-instant"])
+async def test_invalid_transfer_block_time_is_requeued_but_not_queried(
+    storage, block_time: object
+) -> None:
+    await storage.insert_chain_events_and_cursor(
+        "ethereum",
+        [
+            _transfer_event(
+                "ethereum", 109, payload_extra={"block_time": block_time}
+            )
+        ],
+        109,
+    )
+
+    assert await storage.unstamped_transfer_blocks(
+        "ethereum", {TRANSFER_FROM}, min_block=100
+    ) == [109]
+    with pytest.raises(
+        storage_module.StorageError, match="ethereum.*109.*block_time"
+    ):
+        await storage.custody_transfers_since(
+            "ethereum", datetime(2026, 1, 1, tzinfo=UTC), {TRANSFER_FROM}
+        )
+
+
+@pytest.mark.asyncio
+async def test_transfer_block_time_utc_conversion_overflow_has_context(
+    storage,
+) -> None:
+    await storage.insert_chain_events_and_cursor(
+        "ethereum",
+        [
+            _transfer_event(
+                "ethereum",
+                109,
+                payload_extra={"block_time": "0001-01-01T00:00:00+23:59"},
+            )
+        ],
+        109,
+    )
+
+    with pytest.raises(
+        storage_module.StorageError,
+        match="ethereum.*109.*block_time.*UTC",
+    ):
+        await storage.custody_transfers_since(
+            "ethereum", datetime(2026, 1, 1, tzinfo=UTC), {TRANSFER_FROM}
+        )
+
+
+@pytest.mark.asyncio
+async def test_set_transfer_block_time_rolls_back_mid_update(storage) -> None:
+    await storage.insert_chain_events_and_cursor(
+        "ethereum",
+        [
+            _transfer_event("ethereum", 110, log_index=0),
+            _transfer_event("ethereum", 110, log_index=1),
+        ],
+        110,
+    )
+    await storage.connection.execute(
+        """
+        CREATE TEMP TRIGGER fail_second_transfer_update
+        BEFORE UPDATE OF payload_json ON chain_events
+        WHEN OLD.chain = 'ethereum'
+          AND OLD.block_number = 110
+          AND OLD.log_index = 1
+        BEGIN
+            SELECT RAISE(ABORT, 'forced second update failure');
+        END
+        """,
+    )
+    await storage.connection.commit()
+
+    with pytest.raises(sqlite3.DatabaseError, match="second update failure"):
+        await storage.set_transfer_block_time(
+            "ethereum", 110, datetime(2026, 9, 11, tzinfo=UTC)
+        )
+    assert storage.connection.in_transaction is False
+
+    reader = sqlite3.connect(storage.path)
+    try:
+        payloads = [
+            json.loads(row[0])
+            for row in reader.execute(
+                """
+                SELECT payload_json FROM chain_events
+                WHERE chain = 'ethereum' AND block_number = 110
+                ORDER BY log_index
+                """
+            ).fetchall()
+        ]
+    finally:
+        reader.close()
+    assert [item.get("block_time") for item in payloads] == [None, None]

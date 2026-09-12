@@ -65,7 +65,7 @@ dashboard:
 - 微信仅显示人工判断所需的摘要、关键数值、时间、来源和建议；完整技术诊断仍保留在日志和 SQLite 中。
 - 官方信息首次采集和超过 24 小时的历史公告只建立基线；之后的新公告或正文变化才参与风险判断。
 - 官方信息事件超过观察窗口时静默转为绿色，不发送逐条“event window expired”通知；真正的规则恢复仍通知。
-- 采集器连续失败 3 次为黄色监控盲区；Binance 盘口或 PoR 在已有成功记录后超过 15 分钟无成功观测为红色盲区。
+- 采集器连续失败 3 次为黄色监控盲区；Binance 盘口在已有成功记录后超过 15 分钟无成功观测为红色盲区。PoR 数据过期等级分别由 `por.yellow_staleness_seconds` 和 `por.red_staleness_seconds` 配置，默认超过 1 小时为黄色、超过 2 小时为红色。
 - 企业微信 HTTP 200 仍检查业务 `errcode`；失败最多尝试两次，未成功不会标记为已送达。
 - `FACT` 是直接链上/交易所事实；`ESTIMATED_SOURCE` 是外部估算来源；`ESTIMATED` 是 `PoR reserves / supply.multichain_total` 的覆盖率估算，不是审计结论。
 
@@ -75,6 +75,17 @@ dashboard:
 
 完整供应量每小时核对一次：原生供应量包含 Ethereum、BNB Chain、Tron、Solana、Aptos、Tempo；桥接发行量包含 Plume、AB Core、Monad、Mantle、Morph；同时核对 Ethereum、BNB Chain、Solana、Aptos、Tempo 的 CCIP 桥池余额。总供应量只汇总 6 条原生链，避免把桥接发行重复计算。正常一轮少于 30 个 RPC/HTTP 响应，不使用 `eth_getLogs`、trace 或 debug 方法。
 
+核心资产风险信号采用以下边界：
+
+- 可信托管地址必须由所属实体的官方来源明确列出，或两个相互独立的公开标签来源一致；人工核验有效期为 90 天。candidate 仅展示，不参与集中度、资金流阈值或资产总状态。
+- Binance 集中度只统计仍在核验有效期内的 `binance_cex` 与 `binance_peg_reserve` 地址，因此显示为“已核验地址下限”，不代表 Binance 的完整持仓。
+- Ethereum、BNB Chain 资金流复用已有 USD1 Transfer 事件；Solana 只计算净余额差，不推断交易对手。
+- 储备覆盖率新鲜度由 `por.coverage_max_age_seconds` 配置；PoR 数据年龄达到 30 分钟（默认 1800 秒）即覆盖率为 UNKNOWN。它与用于监控数据过期等级的 `por.yellow_staleness_seconds`、`por.red_staleness_seconds` 用途不同。完整多链供应量过期时覆盖率同样为 UNKNOWN；最后一次储备金额仍可展示，但不能继续支撑绿色判断。
+- 官方页面和 BitGo Status 没有发现异常时只表示“未发现官方限制”，不等于主动赎回成功。本程序不使用账户或钱包做真实赎回测试。
+- 媒体线索不告警，只在网页仪表盘作为待核实信息展示，不改变资产风险状态，也不发送企业微信。
+
+按默认 10 分钟检查频率和当前示例地址数量估算，托管地址监控的固定 RPC 响应基线为：EVM：约 13.82–14.28 万次/月；Solana：约 3.02–3.12 万次/月；合计约 16.85–17.41 万次/月（分别按 30/31 天计算）。EVM 资金流另加命中可信 EVM 地址的唯一 Transfer 区块数；每个相关区块只补取一次时间戳，不重复拉取日志，也不恢复逐区块交易扫描。这部分变量增量应以上线后的实际命中区块数核对。
+
 `TRON_RPC_URLS`、`SOLANA_RPC_URLS`、`APTOS_INDEXER_URLS`、`TEMPO_RPC_URLS`、`PLUME_RPC_URLS`、`AB_RPC_URLS`、`MONAD_RPC_URLS`、`MANTLE_RPC_URLS`、`MORPH_RPC_URLS` 都支持在 `.env` 中用英文逗号配置多个端点。
 
 以下能力会在 `status` 中明确列为 `NOT_MONITORED`：
@@ -82,7 +93,6 @@ dashboard:
 - `private_exchange_account`
 - `active_conversion_probe`
 - `tron_solana_aptos_tempo_bridges`
-- `binance_wallet_concentration`
 - `social_media_sentiment`
 - `defi_liquidations`
 

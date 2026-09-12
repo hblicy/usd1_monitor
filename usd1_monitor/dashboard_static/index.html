@@ -56,6 +56,40 @@
         <div id="metric-grid" class="metric-grid" aria-live="polite"></div>
       </section>
 
+      <section id="custody-risk" class="section-panel">
+        <div class="section-heading">
+          <h2>托管集中度与资金变化</h2>
+        </div>
+        <div id="custody-summary" class="custody-summary" aria-live="polite">
+          <p class="empty-copy">正在读取托管数据</p>
+        </div>
+        <div id="custody-entities" class="custody-grid" aria-live="polite"></div>
+        <div id="custody-flows" class="custody-grid custody-flow-grid" aria-live="polite"></div>
+        <div class="subsection-heading">
+          <h3>地址明细与核验证据</h3>
+        </div>
+        <div id="custody-addresses" class="address-grid" aria-live="polite"></div>
+      </section>
+
+      <section id="redemption-status" class="section-panel redemption-panel">
+        <div class="section-heading">
+          <h2>官方赎回通道</h2>
+        </div>
+        <div id="redemption-content" class="redemption-content" aria-live="polite">
+          <p class="empty-copy">正在读取官方状态</p>
+        </div>
+      </section>
+
+      <section id="unverified-leads" class="section-panel">
+        <div class="section-heading">
+          <h2>待核实媒体线索</h2>
+          <p>仅供人工核对，不改变风险等级，也不发送通知。</p>
+        </div>
+        <div id="unverified-lead-list" class="lead-grid" aria-live="polite">
+          <p class="empty-copy">正在读取媒体线索</p>
+        </div>
+      </section>
+
       <section id="collector-health" class="section-panel">
         <div class="section-heading">
           <h2>数据源健康</h2>

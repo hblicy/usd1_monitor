@@ -102,6 +102,7 @@ async def run_dashboard(
         config.database_path,
         timezone_name=config.timezone,
         event_active_seconds=config.event_active_seconds,
+        coverage_max_age_seconds=config.por.coverage_max_age_seconds,
     )
     runner = None
     await repository.open()

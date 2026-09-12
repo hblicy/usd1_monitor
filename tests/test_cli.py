@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+import usd1_monitor.cli as cli_module
 from usd1_monitor.cli import async_main, build_market_monitor
 from usd1_monitor.collectors.announcements import BinancePartialCollectionError
 from usd1_monitor.collectors.multichain_supply import REQUIRED_COMPONENT_IDS
@@ -37,6 +38,40 @@ def test_builder_wires_all_multichain_supply_sources(
     source = monitor._reserve_supply._supply._multichain
     assert source.required_component_ids == REQUIRED_COMPONENT_IDS
     assert source.max_concurrency == 4
+    assert resource is not None
+
+
+def test_builder_reuses_evm_and_solana_rpc_clients_for_custody(
+    storage,
+    tmp_path: Path,
+) -> None:
+    config = AppConfig.model_validate(
+        {
+            "database_path": tmp_path / "monitor.db",
+            "custody": {
+                "addresses": [
+                    {
+                        "chain": "ethereum",
+                        "address": "0x" + "11" * 20,
+                        "entity": "binance_cex",
+                        "label": "Binance",
+                        "role": "hot_wallet",
+                    }
+                ]
+            },
+        }
+    )
+
+    monitor, resource = build_market_monitor(config, storage)
+
+    assert monitor._custody is not None
+    ethereum_rpc = monitor._evm_chains[0]._scanner._rpc
+    assert monitor._custody._collector._evm_rpcs["ethereum"] is ethereum_rpc
+    supply_sources = monitor._reserve_supply._supply._multichain._sources
+    solana_source = next(
+        item for item in supply_sources if "native_solana" in item.component_ids
+    )
+    assert monitor._custody._collector._solana_rpc is solana_source._rpc
     assert resource is not None
 
 
@@ -105,6 +140,38 @@ async def test_status_lists_every_not_monitored_item(tmp_path: Path, capsys) -> 
     assert await async_main(["--config", str(config), "status"]) == 0
     output = capsys.readouterr().out
     assert all(item in output for item in NOT_MONITORED)
+
+
+@pytest.mark.asyncio
+async def test_status_passes_configured_por_coverage_freshness(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    config = tmp_path / "config.yaml"
+    database_path = tmp_path / "monitor.db"
+    config.write_text(
+        (
+            f"database_path: '{database_path.as_posix()}'\n"
+            "por:\n"
+            "  coverage_max_age_seconds: 3600\n"
+        ),
+        encoding="utf-8",
+    )
+    captured: dict[str, object] = {}
+
+    async def fake_print_status(
+        storage,
+        *,
+        timezone_name,
+        coverage_max_age_seconds,
+        now=None,
+    ) -> None:
+        captured["coverage_max_age_seconds"] = coverage_max_age_seconds
+
+    monkeypatch.setattr(cli_module, "_print_status", fake_print_status)
+
+    assert await async_main(["--config", str(config), "status"]) == 0
+    assert captured["coverage_max_age_seconds"] == 3600
 
 
 @pytest.mark.asyncio

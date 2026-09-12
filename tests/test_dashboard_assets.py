@@ -60,7 +60,7 @@ def test_dashboard_assets_explain_unavailable_supply_metrics() -> None:
 
     assert "function unavailableMetricReason" in javascript
     assert "等待完整多链供应量采集" in javascript
-    assert "等待官方储备数据更新" in javascript
+    assert "官方储备数据已过期，当前覆盖率无法判断" in javascript
     assert "正在积累24小时完整数据" in javascript
     assert "renderMetrics(snapshot.metrics, snapshot.generated_at)" in javascript
 
@@ -126,6 +126,14 @@ def test_unavailable_metric_reason_checks_supply_and_reserve_freshness() -> None
             "generatedAt": generated_at,
         },
         {
+            "key": "estimated_collateralization",
+            "metrics": {
+                "multichain_supply": fresh_supply,
+                "reserves": {**fresh_reserves, "available": False},
+            },
+            "generatedAt": generated_at,
+        },
+        {
             "key": "supply_change_24h",
             "metrics": {"multichain_supply": fresh_supply},
             "generatedAt": generated_at,
@@ -152,8 +160,9 @@ def test_unavailable_metric_reason_checks_supply_and_reserve_freshness() -> None
     assert json.loads(result.stdout) == [
         "等待完整多链供应量采集",
         "等待完整多链供应量采集",
-        "等待官方储备数据更新",
+        "官方储备数据已过期，当前覆盖率无法判断",
         "等待下一次覆盖率计算",
+        "官方储备数据已过期，当前覆盖率无法判断",
         "正在积累24小时完整数据",
     ]
 
@@ -231,4 +240,68 @@ def test_supply_metric_availability_rejects_stale_values() -> None:
         True,
         True,
         True,
+    ]
+
+
+def test_dashboard_assets_render_new_risk_sections_without_inner_html() -> None:
+    html = (ASSET_ROOT / "index.html").read_text(encoding="utf-8")
+    javascript = (ASSET_ROOT / "dashboard.js").read_text(encoding="utf-8")
+
+    assert 'id="custody-risk"' in html
+    assert 'id="redemption-status"' in html
+    assert 'id="unverified-leads"' in html
+    assert "renderCustody" in javascript
+    assert "renderRedemption" in javascript
+    assert "renderUnverifiedLeads" in javascript
+    assert "item.publisher" in javascript
+    assert "已核验 Binance 地址至少占比" in javascript
+    assert "非交易对手归因" in javascript
+    assert "未发现官方限制" in javascript
+    assert "关键风险数据暂不可用，当前无法完整判断 USD1 风险" in javascript
+    assert "官方储备数据已过期，当前覆盖率无法判断" in javascript
+    assert "最后已知" in javascript
+    assert ".innerHTML" not in javascript
+    assert "textContent" in javascript
+    assert "safeLink" in javascript
+
+
+def test_dashboard_new_sections_have_responsive_layout() -> None:
+    css = (ASSET_ROOT / "dashboard.css").read_text(encoding="utf-8")
+
+    assert ".custody-grid" in css
+    assert ".address-grid" in css
+    assert ".redemption-panel" in css
+    assert ".lead-grid" in css
+    assert "@media (max-width: 720px)" in css
+
+
+def test_solana_delta_text_distinguishes_last_known_from_accumulating() -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required for dashboard behavior tests")
+    javascript = (ASSET_ROOT / "dashboard.js").read_text(encoding="utf-8")
+    start = javascript.index("function formatAmount")
+    end = javascript.index("function renderCustody(custody)", start)
+    custody_helpers = javascript[start:end]
+    script = "\n".join(
+        (
+            custody_helpers,
+            "console.log(JSON.stringify([",
+            "  solanaDeltaText({delta_1h: null, delta_1h_last_known: 12}, 1),",
+            "  solanaDeltaText({delta_1h: null}, 1),",
+            "]));",
+        )
+    )
+
+    result = subprocess.run(
+        [node, "-e", script],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == [
+        "12 USD1（最后已知）",
+        "正在积累数据",
     ]
