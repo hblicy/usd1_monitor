@@ -11,6 +11,7 @@ from typing import Protocol
 from urllib.parse import urlsplit
 
 from usd1_monitor.config import (
+    CustodyAddressConfig,
     CustodyConfig,
     MarketConfig,
     RedemptionConfig,
@@ -1119,6 +1120,15 @@ class CustodyConcentrationMonitor:
     def _address_key(chain: str, address: str) -> str:
         return address if chain == "solana" else address.casefold()
 
+    @staticmethod
+    def _custody_address_url(chain: str, address: str) -> str | None:
+        explorer_base = EXPLORER_BASE_URLS.get(chain)
+        if explorer_base is not None:
+            return f"{explorer_base}/address/{address}"
+        if chain == "solana":
+            return f"https://solscan.io/account/{address}"
+        return None
+
     async def check_once(
         self,
         *,
@@ -1466,28 +1476,43 @@ class CustodyConcentrationMonitor:
     async def _process_evm_flows(
         self,
         collections: dict[str, CustodyCollection],
-        trusted: list[object],
+        trusted: list[CustodyAddressConfig],
         now: datetime,
         *,
         evaluate_rules: bool,
     ) -> list[str]:
         errors: list[str] = []
         binance_by_chain: dict[str, set[str]] = {}
+        labels: dict[str, str] = {}
+        address_source_urls: dict[str, list[str]] = {}
         for item in trusted:
             if item.chain in {"ethereum", "bsc"} and item.entity in {
                 "binance_cex",
                 "binance_peg_reserve",
             }:
-                binance_by_chain.setdefault(item.chain, set()).add(
-                    item.address.casefold()
-                )
+                address = item.address.casefold()
+                scope = f"{item.chain}:{address}"
+                binance_by_chain.setdefault(item.chain, set()).add(address)
+                labels[scope] = item.label
+                urls = address_source_urls.setdefault(scope, [])
+                for entry in item.evidence:
+                    if entry.url not in urls:
+                        urls.append(entry.url)
+                address_url = self._custody_address_url(item.chain, address)
+                if address_url is not None and address_url not in urls:
+                    urls.append(address_url)
         if not binance_by_chain:
             return errors
+
+        covered_chains = [
+            chain for chain in ("ethereum", "bsc") if chain in binance_by_chain
+        ]
 
         all_ready_1h = True
         all_ready_24h = True
         entity_net = 0.0
         address_outflows: dict[str, float] = {}
+        chain_source_urls: dict[str, str] = {}
         for chain, addresses in binance_by_chain.items():
             collection = collections.get(chain)
             if collection is None or not collection.trusted_complete:
@@ -1495,6 +1520,11 @@ class CustodyConcentrationMonitor:
             safe_block = collection.safe_block
             if not isinstance(safe_block, int):
                 return [f"custody: {chain} flow safe block is unavailable"]
+            explorer_base = EXPLORER_BASE_URLS.get(chain)
+            if explorer_base is not None:
+                chain_source_urls[chain] = (
+                    f"{explorer_base}/block/{safe_block}"
+                )
             marker = await self._storage.latest_observation(
                 "custody.flow_start_block", chain
             )
@@ -1573,6 +1603,10 @@ class CustodyConcentrationMonitor:
             entity_net,
             address_outflows,
             now,
+            chains=covered_chains,
+            labels=labels,
+            address_source_urls=address_source_urls,
+            chain_source_urls=chain_source_urls,
             ready_1h=all_ready_1h,
             ready_24h=all_ready_24h,
             evaluate_rules=evaluate_rules and not errors,
@@ -1597,6 +1631,10 @@ class CustodyConcentrationMonitor:
         address_outflows: dict[str, float],
         now: datetime,
         *,
+        chains: list[str],
+        labels: dict[str, str],
+        address_source_urls: dict[str, list[str]],
+        chain_source_urls: dict[str, str],
         ready_1h: bool,
         ready_24h: bool,
         evaluate_rules: bool,
@@ -1646,6 +1684,23 @@ class CustodyConcentrationMonitor:
             await self._interrupt_rules(
                 tuple(interrupted), now, "custody flow window unavailable"
             )
+        flow_source_urls = [
+            chain_source_urls[chain]
+            for chain in chains
+            if chain in chain_source_urls
+        ]
+        outflow_source_urls: list[str] = []
+        if address_outflows:
+            largest_scope = max(
+                address_outflows, key=lambda scope: address_outflows[scope]
+            )
+            outflow_source_urls.extend(
+                address_source_urls.get(largest_scope, [])
+            )
+            largest_chain = largest_scope.partition(":")[0]
+            block_url = chain_source_urls.get(largest_chain)
+            if block_url is not None and block_url not in outflow_source_urls:
+                outflow_source_urls.append(block_url)
         if ready_24h and evaluate_rules:
             await self._evaluate_rule(
                 "custody.binance_flow_24h",
@@ -1660,6 +1715,10 @@ class CustodyConcentrationMonitor:
                 {
                     "value": entity_net,
                     "threshold": self._config.entity_flow_24h,
+                    "chains": chains,
+                    "label": "已核验 Binance 地址组",
+                    "labels": labels,
+                    "source_urls": flow_source_urls,
                     "data_time": now.isoformat(),
                 },
                 "custody:flow:24h",
@@ -1678,6 +1737,9 @@ class CustodyConcentrationMonitor:
                 {
                     "values": address_outflows,
                     "threshold": self._config.address_outflow_1h,
+                    "chains": chains,
+                    "labels": labels,
+                    "source_urls": outflow_source_urls,
                     "data_time": now.isoformat(),
                 },
                 "custody:flow:1h",

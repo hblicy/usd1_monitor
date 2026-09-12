@@ -596,6 +596,87 @@ async def test_mature_address_outflow_uses_stable_scopes_and_yellow_only(
     state = await storage.get_risk_state("custody.address_outflow_1h")
     assert outflow is not None and outflow.value == pytest.approx(105_000_001)
     assert state is not None and state.level is RiskLevel.YELLOW
+    rule_row = await storage.latest_observation(
+        "custody.rule_state", "custody.address_outflow_1h"
+    )
+    assert rule_row is not None
+    evidence = rule_row.metadata["evidence"]
+    assert evidence["chains"] == ["ethereum", "bsc"]
+    assert evidence["labels"][f"ethereum:{ETH}"] == "Binance ETH"
+    assert evidence["labels"][f"bsc:{BSC}"] == "Binance reserve"
+    assert f"https://etherscan.io/address/{ETH}" in evidence["source_urls"]
+    assert "https://etherscan.io/block/100" in evidence["source_urls"]
+    assert all("bscscan.com" not in url for url in evidence["source_urls"])
+    pending = await storage.pending_alerts()
+    address_alert = next(
+        item.content for item in pending if "1 小时净流出" in item.content
+    )
+    assert "Ethereum Binance ETH 1 小时净流出 1.05000001 亿 USD1" in address_alert
+    assert f"https://etherscan.io/address/{ETH}" in address_alert
+    assert "custody.address_outflow_1h" not in address_alert
+
+
+@pytest.mark.asyncio
+async def test_flow_alert_uses_only_actual_trusted_chain_and_human_label(
+    storage,
+) -> None:
+    await seed_supply(storage, value=200_000_000)
+    base = custody_config()
+    candidate_bsc = base.addresses[1].model_copy(
+        update={"status": "candidate", "verified_on": None}
+    )
+    config = base.model_copy(
+        update={"addresses": [base.addresses[0], candidate_bsc]}
+    )
+    for metric in ("custody.flow_start_block", "custody.flow_coverage_start"):
+        await storage.insert_observation(
+            observation(metric, "ethereum", 100, NOW - timedelta(hours=25))
+        )
+    await storage.set_scan_cursor("ethereum", 100)
+    await storage.insert_chain_events_and_cursor(
+        "ethereum",
+        [
+            ChainEvent(
+                "ethereum",
+                100,
+                "0xinflow",
+                0,
+                "TRANSFER",
+                {
+                    "from_address": "0x" + "99" * 20,
+                    "to_address": ETH,
+                    "amount": 60_000_000.0,
+                    "block_time": (NOW - timedelta(minutes=30)).isoformat(),
+                },
+                NOW,
+            )
+        ],
+        100,
+    )
+    monitor = CustodyConcentrationMonitor(
+        FakeCustodySource({ETH: 40_000_000, BSC: 150_000_000}),
+        storage,
+        config,
+        timezone_name="UTC",
+    )
+
+    await monitor.check_once(deliver=False, now=NOW)
+
+    rule_row = await storage.latest_observation(
+        "custody.rule_state", "custody.binance_flow_24h"
+    )
+    assert rule_row is not None
+    evidence = rule_row.metadata["evidence"]
+    assert evidence["chains"] == ["ethereum"]
+    assert evidence["labels"] == {f"ethereum:{ETH}": "Binance ETH"}
+    assert evidence["source_urls"] == ["https://etherscan.io/block/100"]
+    pending = await storage.pending_alerts()
+    assert len(pending) == 1
+    alert = pending[0].content
+    assert "Ethereum 已核验 Binance 地址组 24 小时净流入 6000 万 USD1" in alert
+    assert "https://etherscan.io/block/100" in alert
+    assert "BNB Chain" not in alert
+    assert "Binance reserve" not in alert
 
 
 @pytest.mark.asyncio

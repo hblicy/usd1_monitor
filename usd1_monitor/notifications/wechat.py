@@ -23,7 +23,11 @@ LEVEL_LABELS = {
     RiskLevel.YELLOW: "🟡 USD1 注意",
     RiskLevel.RED: "🔴 USD1 危险",
 }
-CHAIN_LABELS = {"ethereum": "Ethereum", "bsc": "BNB Chain"}
+CHAIN_LABELS = {
+    "ethereum": "Ethereum",
+    "bsc": "BNB Chain",
+    "solana": "Solana",
+}
 COLLECTOR_LABELS = {
     "binance_market": "Binance 市场",
     "market": "Binance 市场",
@@ -215,11 +219,138 @@ def _chain_label(rule_id: str, evidence: dict[str, object]) -> str:
     return CHAIN_LABELS.get(chain, "链上")
 
 
+def _custody_chain_label(chain: object) -> str:
+    if isinstance(chain, str) and chain:
+        return CHAIN_LABELS.get(chain, chain)
+    return "相关链上"
+
+
+def _custody_chains_label(evidence: dict[str, object]) -> str:
+    chain = evidence.get("chain")
+    if isinstance(chain, str) and chain:
+        return _custody_chain_label(chain)
+    chains = evidence.get("chains")
+    if isinstance(chains, (list, tuple)):
+        labels = [
+            _custody_chain_label(item)
+            for item in chains
+            if isinstance(item, str) and item
+        ]
+        if labels:
+            return "、".join(dict.fromkeys(labels))
+    return "相关链上"
+
+
+def _custody_group_label(evidence: dict[str, object]) -> str:
+    label = evidence.get("label")
+    if isinstance(label, str) and label:
+        return label
+    raw_labels = evidence.get("labels")
+    if isinstance(raw_labels, dict):
+        labels = [str(item) for item in raw_labels.values() if item]
+    elif isinstance(raw_labels, (list, tuple)):
+        labels = [str(item) for item in raw_labels if item]
+    else:
+        labels = []
+    unique = list(dict.fromkeys(labels))
+    if unique:
+        return f"{'、'.join(unique)} 地址组"
+    return "已核验 Binance 地址组"
+
+
+def _custody_flow_summary(
+    evidence: dict[str, object], *, hours: int
+) -> str:
+    chain = str(evidence.get("chain", ""))
+    raw_chains = evidence.get("chains")
+    includes_solana = chain == "solana" or (
+        isinstance(raw_chains, (list, tuple)) and "solana" in raw_chains
+    )
+    chain_label = _custody_chains_label(evidence)
+    label = _custody_group_label(evidence)
+    value = evidence.get("value", 0)
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return f"{chain_label} {label} {hours} 小时出现大额资金变化"
+    direction = "余额增加" if value >= 0 else "余额减少"
+    if not includes_solana:
+        direction = "净流入" if value >= 0 else "净流出"
+    return (
+        f"{chain_label} {label} {hours} 小时{direction} "
+        f"{_format_usd1_amount(value)} USD1"
+    )
+
+
+def _largest_address_outflow(
+    evidence: dict[str, object],
+) -> tuple[str, str, float] | None:
+    values = evidence.get("values")
+    if not isinstance(values, dict):
+        return None
+    numeric = [
+        (str(scope), value)
+        for scope, value in values.items()
+        if isinstance(value, (int, float)) and not isinstance(value, bool)
+    ]
+    if not numeric:
+        return None
+    scope, value = max(numeric, key=lambda item: float(item[1]))
+    chain, separator, address = scope.partition(":")
+    labels = evidence.get("labels")
+    label = labels.get(scope) if isinstance(labels, dict) else None
+    fallback_label = f"已核验地址 {address}" if separator else scope
+    return chain, str(label or fallback_label), float(value)
+
+
 def _human_summary(transition: RiskTransition) -> tuple[str, list[str]]:
     rule_id = transition.rule_id
     evidence = transition.evidence
     recovered = transition.current is RiskLevel.GREEN
     details: list[str] = []
+
+    if rule_id == "custody.binance_concentration":
+        if recovered:
+            return "集中度已回到预警线内", details
+        share = evidence.get("share")
+        if isinstance(share, (int, float)) and not isinstance(share, bool):
+            summary = (
+                "已核验 Binance 地址至少占全网供应量 "
+                f"{_format_number(float(share) * 100)}%"
+            )
+        else:
+            summary = "已核验 Binance 地址集中度超过预警线"
+        balance = evidence.get("verified_balance")
+        if balance is not None:
+            details.append(
+                f"已核验余额：{_format_usd1_amount(balance)} USD1"
+            )
+        return summary, details
+
+    if rule_id == "custody.binance_flow_24h":
+        if recovered:
+            return "大额资金变化已结束", details
+        return _custody_flow_summary(evidence, hours=24), details
+
+    if rule_id == "custody.address_outflow_1h":
+        if recovered:
+            return "大额资金变化已结束", details
+        largest = _largest_address_outflow(evidence)
+        if largest is None:
+            return "已核验 Binance 地址 1 小时出现大额资金流出", details
+        chain, label, value = largest
+        chain_label = _custody_chain_label(chain)
+        direction = "余额减少" if chain == "solana" else "净流出"
+        return (
+            f"{chain_label} {label} 1 小时{direction} "
+            f"{_format_usd1_amount(value)} USD1"
+        ), details
+
+    if rule_id == "redemption.channel":
+        if recovered:
+            return "官方赎回限制已解除", details
+        summary = evidence.get("summary")
+        if isinstance(summary, str) and summary.strip():
+            return summary.strip(), details
+        return "官方赎回通道出现需要关注的变化", details
 
     if rule_id == "health.supply_multichain":
         if recovered:
@@ -448,7 +579,11 @@ class WeChatNotifier:
 
 
 def _advice(
-    level: RiskLevel, *, health_only: bool, por_age_only: bool = False
+    level: RiskLevel,
+    *,
+    health_only: bool,
+    por_age_only: bool = False,
+    has_sources: bool = True,
 ) -> str:
     if level is RiskLevel.GREEN:
         return "建议：继续观察一段时间。"
@@ -456,6 +591,8 @@ def _advice(
         return "建议：请稍后查看官方储备页面是否恢复更新。"
     if health_only:
         return "建议：请检查监控服务和数据源是否正常。"
+    if not has_sources:
+        return "建议：请打开监控面板查看详情。"
     return "建议：请打开信息来源并人工确认。"
 
 
@@ -540,6 +677,7 @@ def format_transitions(
             display_level,
             health_only=health_only,
             por_age_only=por_age_only,
+            has_sources=any(_source_urls(item.evidence) for item in items),
         ),
     ))
     return "\n".join(lines)
