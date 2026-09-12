@@ -38,6 +38,7 @@ async def insert_observation(
     observed_at: datetime = NOW,
     unit: str = "USD1",
     metadata: dict[str, object] | None = None,
+    quality: str = "FACT",
 ) -> None:
     await storage.insert_observation(
         Observation(
@@ -48,9 +49,56 @@ async def insert_observation(
             unit=unit,
             observed_at=observed_at,
             collected_at=observed_at + timedelta(seconds=2),
-            quality="FACT",
+            quality=quality,
             metadata=metadata or {},
         )
+    )
+
+
+async def seed_asset_pillars(
+    storage,
+    *,
+    concentration_at: datetime = NOW,
+    reserves_at: datetime = NOW,
+    supply_at: datetime = NOW,
+    redemption_at: datetime = NOW,
+    reserves_quality: str = "FACT",
+    supply_quality: str = "FACT",
+) -> None:
+    await insert_observation(
+        storage,
+        "custody.binance_share_lower_bound",
+        "global",
+        0.40,
+        observed_at=concentration_at,
+        unit="ratio",
+        metadata={"max_age_seconds": 1200},
+    )
+    await insert_observation(
+        storage,
+        "por.reserves",
+        "ethereum",
+        4_200_000_000,
+        observed_at=reserves_at,
+        unit="USD",
+        quality=reserves_quality,
+    )
+    await insert_observation(
+        storage,
+        "supply.multichain_total",
+        "global",
+        4_100_000_000,
+        observed_at=supply_at,
+        quality=supply_quality,
+    )
+    await insert_observation(
+        storage,
+        "redemption.channel_status",
+        "global",
+        0,
+        observed_at=redemption_at,
+        unit="risk_level",
+        metadata={"max_age_seconds": 900},
     )
 
 
@@ -150,9 +198,223 @@ async def test_snapshot_reports_unknown_when_no_states_exist(storage) -> None:
     finally:
         await repository.close()
 
-    assert snapshot["business"] == {"level": "UNKNOWN", "items": []}
+    assert snapshot["business"] == {
+        "level": "UNKNOWN",
+        "items": [],
+        "missing_pillars": [
+            {"name": "concentration", "reason": "custody_unavailable"},
+            {"name": "coverage", "reason": "coverage_unavailable"},
+            {"name": "redemption", "reason": "redemption_unavailable"},
+        ],
+    }
     assert snapshot["health"]["level"] == "UNKNOWN"
     assert snapshot["health"]["items"] == []
+
+
+@pytest.mark.asyncio
+async def test_dashboard_business_is_unknown_when_por_is_stale(storage) -> None:
+    await storage.set_risk_state("market.price", RiskLevel.GREEN, NOW, NOW)
+    await seed_asset_pillars(storage, reserves_at=NOW - timedelta(minutes=30))
+    await insert_observation(
+        storage,
+        "supply.estimated_collateralization",
+        "global",
+        102.44,
+        observed_at=NOW,
+        unit="percent",
+        quality="ESTIMATED",
+    )
+    repository = DashboardRepository(storage.path)
+    await repository.open()
+    try:
+        snapshot = await repository.snapshot(now=NOW)
+    finally:
+        await repository.close()
+
+    assert snapshot["business"]["level"] == "UNKNOWN"
+    assert snapshot["business"]["missing_pillars"] == [
+        {"name": "coverage", "reason": "coverage_unavailable"}
+    ]
+    assert snapshot["metrics"]["reserves"]["value"] == 4_200_000_000
+    assert snapshot["metrics"]["estimated_collateralization"] is None
+
+
+@pytest.mark.asyncio
+async def test_dashboard_business_is_green_when_all_pillars_are_ready(storage) -> None:
+    await storage.set_risk_state("market.price", RiskLevel.GREEN, NOW, NOW)
+    await seed_asset_pillars(storage)
+    repository = DashboardRepository(storage.path)
+    await repository.open()
+    try:
+        business = (await repository.snapshot(now=NOW))["business"]
+    finally:
+        await repository.close()
+
+    assert business["level"] == "GREEN"
+    assert business["missing_pillars"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("max_age_seconds", "reserve_age_seconds", "expected_level"),
+    [(900, 900, "UNKNOWN"), (3600, 1800, "GREEN")],
+)
+async def test_dashboard_uses_configured_por_coverage_freshness(
+    storage,
+    max_age_seconds: int,
+    reserve_age_seconds: int,
+    expected_level: str,
+) -> None:
+    await storage.set_risk_state("market.price", RiskLevel.GREEN, NOW, NOW)
+    await seed_asset_pillars(
+        storage,
+        reserves_at=NOW - timedelta(seconds=reserve_age_seconds),
+    )
+    repository = DashboardRepository(
+        storage.path,
+        coverage_max_age_seconds=max_age_seconds,
+    )
+    await repository.open()
+    try:
+        business = (await repository.snapshot(now=NOW))["business"]
+    finally:
+        await repository.close()
+
+    assert business["level"] == expected_level
+
+
+@pytest.mark.parametrize("max_age_seconds", [0, True])
+def test_dashboard_rejects_invalid_por_coverage_freshness(
+    storage,
+    max_age_seconds: object,
+) -> None:
+    with pytest.raises(ValueError, match="coverage_max_age_seconds"):
+        DashboardRepository(
+            storage.path,
+            coverage_max_age_seconds=max_age_seconds,
+        )
+
+
+@pytest.mark.asyncio
+async def test_known_yellow_precedes_missing_pillar(storage) -> None:
+    await storage.set_risk_state("market.price", RiskLevel.YELLOW, NOW, NOW)
+    repository = DashboardRepository(storage.path)
+    await repository.open()
+    try:
+        business = (await repository.snapshot(now=NOW))["business"]
+    finally:
+        await repository.close()
+
+    assert business["level"] == "YELLOW"
+    assert len(business["missing_pillars"]) == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("supply_age", "supply_quality", "expected_level"),
+    [
+        (4500, "FACT", "GREEN"),
+        (4501, "FACT", "UNKNOWN"),
+        (0, "ESTIMATED", "UNKNOWN"),
+    ],
+)
+async def test_dashboard_coverage_reuses_supply_freshness_and_quality_rules(
+    storage,
+    supply_age: int,
+    supply_quality: str,
+    expected_level: str,
+) -> None:
+    await storage.set_risk_state("market.price", RiskLevel.GREEN, NOW, NOW)
+    await seed_asset_pillars(
+        storage,
+        supply_at=NOW - timedelta(seconds=supply_age),
+        supply_quality=supply_quality,
+    )
+    repository = DashboardRepository(storage.path)
+    await repository.open()
+    try:
+        business = (await repository.snapshot(now=NOW))["business"]
+    finally:
+        await repository.close()
+
+    assert business["level"] == expected_level
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("pillar", "age_seconds"),
+    [("concentration", 1200), ("redemption", 900)],
+)
+async def test_dashboard_metadata_freshness_boundary_is_unavailable(
+    storage,
+    pillar: str,
+    age_seconds: int,
+) -> None:
+    times = {
+        "concentration_at": NOW,
+        "redemption_at": NOW,
+    }
+    times[f"{pillar}_at"] = NOW - timedelta(seconds=age_seconds)
+    await storage.set_risk_state("market.price", RiskLevel.GREEN, NOW, NOW)
+    await seed_asset_pillars(storage, **times)
+    repository = DashboardRepository(storage.path)
+    await repository.open()
+    try:
+        business = (await repository.snapshot(now=NOW))["business"]
+    finally:
+        await repository.close()
+
+    assert business["level"] == "UNKNOWN"
+    assert business["missing_pillars"][0]["name"] == pillar
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "observed_at", [NOW.replace(tzinfo=None), NOW + timedelta(seconds=1)]
+)
+async def test_dashboard_rejects_invalid_critical_pillar_time(
+    storage,
+    observed_at: datetime,
+) -> None:
+    await storage.set_risk_state("market.price", RiskLevel.GREEN, NOW, NOW)
+    await seed_asset_pillars(storage, reserves_at=observed_at)
+    repository = DashboardRepository(storage.path)
+    await repository.open()
+    try:
+        with pytest.raises(DashboardDataError, match="database snapshot cannot be read"):
+            await repository.snapshot(now=NOW)
+    finally:
+        await repository.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "metadata",
+    [{}, {"max_age_seconds": 0}, {"max_age_seconds": True}],
+)
+async def test_dashboard_requires_positive_integer_pillar_freshness_metadata(
+    storage,
+    metadata: dict[str, object],
+) -> None:
+    await storage.set_risk_state("market.price", RiskLevel.GREEN, NOW, NOW)
+    await seed_asset_pillars(storage)
+    await insert_observation(
+        storage,
+        "custody.binance_share_lower_bound",
+        "global",
+        0.40,
+        unit="ratio",
+        metadata=metadata,
+    )
+    repository = DashboardRepository(storage.path)
+    await repository.open()
+    try:
+        business = (await repository.snapshot(now=NOW))["business"]
+    finally:
+        await repository.close()
+
+    assert business["level"] == "UNKNOWN"
+    assert business["missing_pillars"][0]["name"] == "concentration"
 
 
 @pytest.mark.asyncio

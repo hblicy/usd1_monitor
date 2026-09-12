@@ -13,8 +13,14 @@ from usd1_monitor.engine.aggregate import (
     health_overall,
     is_monitoring_health_rule,
 )
+from usd1_monitor.engine.asset_assessment import (
+    POR_COVERAGE_MAX_AGE_SECONDS,
+    Pillar,
+    assess_asset,
+    pillar_from_observations,
+)
 from usd1_monitor.http import sanitize_url
-from usd1_monitor.models import RiskLevel, RiskState
+from usd1_monitor.models import Observation, RiskLevel, RiskState
 from usd1_monitor.time_utils import local_iso
 
 
@@ -131,10 +137,19 @@ class DashboardRepository:
         *,
         timezone_name: str = "Asia/Shanghai",
         event_active_seconds: int = 3600,
+        coverage_max_age_seconds: int = POR_COVERAGE_MAX_AGE_SECONDS,
     ) -> None:
+        if (
+            type(coverage_max_age_seconds) is not int
+            or coverage_max_age_seconds <= 0
+        ):
+            raise ValueError(
+                "coverage_max_age_seconds must be a positive integer"
+            )
         self.path = path
         self.timezone_name = timezone_name
         self.event_active_seconds = event_active_seconds
+        self.coverage_max_age_seconds = coverage_max_age_seconds
         self._connection: aiosqlite.Connection | None = None
         self._snapshot_lock = asyncio.Lock()
 
@@ -189,6 +204,18 @@ class DashboardRepository:
                 business = await self._state_group(
                     states, health=False, now=current_time
                 )
+                pillars = await self._critical_pillars(current_time)
+                known_level = business_overall(
+                    states,
+                    now=current_time,
+                    event_active_seconds=self.event_active_seconds,
+                )
+                assessment = assess_asset(known_level, pillars)
+                business["level"] = assessment.level.name
+                business["missing_pillars"] = [
+                    {"name": pillar.name, "reason": pillar.reason}
+                    for pillar in assessment.missing_pillars
+                ]
                 health = await self._state_group(
                     states, health=True, now=current_time
                 )
@@ -211,11 +238,16 @@ class DashboardRepository:
                                 "changed_at": self._format_time(stale_at),
                             }
                         )
+                metrics = await self._metrics(current_time)
+                if not next(
+                    pillar.available for pillar in pillars if pillar.name == "coverage"
+                ):
+                    metrics["estimated_collateralization"] = None
                 result: dict[str, object] = {
                     "generated_at": self._format_time(current_time),
                     "business": business,
                     "health": health,
-                    "metrics": await self._metrics(current_time),
+                    "metrics": metrics,
                     "recent": {
                         "alerts": await self._recent_alerts(),
                         "chain_events": await self._recent_chain_events(),
@@ -231,6 +263,52 @@ class DashboardRepository:
                         "database snapshot cannot be read"
                     ) from exc
                 raise
+
+    async def _critical_pillars(self, now: datetime) -> list[Pillar]:
+        return pillar_from_observations(
+            now=now,
+            coverage_max_age_seconds=self.coverage_max_age_seconds,
+            concentration=await self._latest_observation(
+                "custody.binance_share_lower_bound", "global"
+            ),
+            reserves=await self._latest_observation("por.reserves", "ethereum"),
+            supply=await self._latest_observation(
+                "supply.multichain_total", "global"
+            ),
+            redemption=await self._latest_observation(
+                "redemption.channel_status", "global"
+            ),
+        )
+
+    async def _latest_observation(
+        self, metric: str, scope: str
+    ) -> Observation | None:
+        cursor = await self.connection.execute(
+            """
+            SELECT metric, source, scope, value, unit, observed_at,
+                   collected_at, quality, metadata_json
+            FROM observations
+            WHERE metric = ? AND scope = ?
+            ORDER BY observed_at DESC, id DESC
+            LIMIT 1
+            """,
+            (metric, scope),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        if row is None:
+            return None
+        return Observation(
+            metric=str(row["metric"]),
+            source=str(row["source"]),
+            scope=str(row["scope"]),
+            value=float(row["value"]),
+            unit=str(row["unit"]),
+            observed_at=datetime.fromisoformat(row["observed_at"]),
+            collected_at=datetime.fromisoformat(row["collected_at"]),
+            quality=str(row["quality"]),
+            metadata=json.loads(row["metadata_json"]),
+        )
 
     async def _risk_states(self) -> list[RiskState]:
         cursor = await self.connection.execute(

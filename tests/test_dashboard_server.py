@@ -121,8 +121,20 @@ async def test_run_dashboard_uses_fixed_host_and_configured_port(
     captured: dict[str, object] = {}
 
     class Repository:
-        def __init__(self, path, *, timezone_name, event_active_seconds):
-            captured["repository"] = (path, timezone_name, event_active_seconds)
+        def __init__(
+            self,
+            path,
+            *,
+            timezone_name,
+            event_active_seconds,
+            coverage_max_age_seconds,
+        ):
+            captured["repository"] = (
+                path,
+                timezone_name,
+                event_active_seconds,
+                coverage_max_age_seconds,
+            )
 
         async def open(self):
             captured["opened"] = True
@@ -152,6 +164,7 @@ async def test_run_dashboard_uses_fixed_host_and_configured_port(
     config = AppConfig(
         database_path=tmp_path / "monitor.db",
         dashboard={"port": 8765},
+        por={"coverage_max_age_seconds": 3600},
     )
 
     await run_dashboard(
@@ -167,6 +180,7 @@ async def test_run_dashboard_uses_fixed_host_and_configured_port(
         config.database_path,
         config.timezone,
         config.event_active_seconds,
+        3600,
     )
     assert captured["site"][1:] == ("127.0.0.1", 8765)
     assert captured["opened"] is True
