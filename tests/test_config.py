@@ -379,7 +379,6 @@ def test_redemption_defaults_and_allowlists() -> None:
     assert config.official_page_urls == [
         "https://www.bitgo.com/usd1/",
         "https://www.bitgo.com/usd1-terms/",
-        "https://investors.bitgo.com/news/default.aspx",
         "https://docs.worldlibertyfinancial.com/resources/faq",
     ]
     assert config.media_rss_urls == []

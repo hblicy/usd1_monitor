@@ -19,7 +19,9 @@ cp .env.example .env
 
 Windows 可用 `Copy-Item` 代替 `cp`。按部署环境修改 `config.yaml`，尤其是 RPC URL 和 `watched_addresses`。`.env` 只保存敏感/环境值：
 
-已有部署升级后，需要在实际 `config.yaml` 的 `chains.ethereum` 和 `chains.bsc` 下都设置 `interval_seconds: 600`、`scan_batch_blocks: 2000`、`log_query_chunk_blocks: 500`，然后重启服务。程序不会自动覆盖实际配置文件。
+已有部署升级后，需要在实际 `config.yaml` 的 `chains.ethereum` 和 `chains.bsc` 下都设置 `interval_seconds: 600`、`scan_batch_blocks: 2000`、`log_query_chunk_blocks: 500`，并从 `deploy/config.production.example.yaml` 复制完整的 `custody:` 配置段；不要用模板覆盖包含实际 RPC 等环境设置的配置文件。然后重启服务。程序不会自动覆盖实际配置文件。
+
+如果现有 `redemption.official_page_urls` 包含持续返回 HTTP 403 的 BitGo Investor News 页面，请删除 `https://investors.bitgo.com/news/default.aspx`；其余 BitGo Status、USD1、USD1 Terms 和 WLFI FAQ 数据源继续作为必需检查项。
 
 程序会自动读取 `config.yaml` 同目录的 `.env`，且不会覆盖 shell 或 systemd 已显式设置的环境变量。观测数据默认保留 180 天，可通过 `retention_days` 调整。
 
