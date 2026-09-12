@@ -8,16 +8,22 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from math import isfinite
 from typing import Protocol
+from urllib.parse import urlsplit
 
 from usd1_monitor.config import (
     CustodyConfig,
     MarketConfig,
+    RedemptionConfig,
     current_date_for_timezone,
 )
 from usd1_monitor.collectors.custody import (
     CustodyBalanceCollector,
     CustodyCollection,
     enrich_transfer_timestamps,
+)
+from usd1_monitor.collectors.redemption import (
+    RedemptionStatusSnapshot,
+    _canonical_page_url,
 )
 from usd1_monitor.collectors.evm import (
     EvmScanner,
@@ -28,6 +34,7 @@ from usd1_monitor.collectors.evm import (
 from usd1_monitor.collectors.announcements import (
     BinancePartialCollectionError,
     OfficialPageCollector,
+    normalize_text,
 )
 from usd1_monitor.collectors.reserves import PorCollector, PorSnapshot
 from usd1_monitor.collectors.supply import (
@@ -58,6 +65,11 @@ from usd1_monitor.engine.custody_rules import (
 from usd1_monitor.engine.information_rules import (
     classify_official_text,
     next_attestation_due_at,
+)
+from usd1_monitor.engine.redemption_rules import (
+    RedemptionClassification,
+    apply_recovery,
+    classify_redemption,
 )
 from usd1_monitor.engine.reserve_rules import (
     PorReading,
@@ -201,6 +213,20 @@ class CheckResult:
     success: bool
     errors: tuple[str, ...]
     details: tuple[str, ...] = ()
+
+
+class RedemptionStatusSource(Protocol):
+    async def collect(self, checked_at: datetime) -> RedemptionStatusSnapshot: ...
+
+
+class RedemptionPageSource(Protocol):
+    source: str
+
+    async def collect(self, checked_at: datetime) -> Announcement: ...
+
+
+class RedemptionMediaSource(Protocol):
+    async def collect(self, checked_at: datetime) -> list[Announcement]: ...
 
 
 class MarketMonitor:
@@ -1749,6 +1775,719 @@ class CustodyConcentrationMonitor:
                 raise
 
 
+class RedemptionChannelMonitor:
+    def __init__(
+        self,
+        status: RedemptionStatusSource,
+        pages: list[RedemptionPageSource],
+        media: list[RedemptionMediaSource],
+        storage: Storage,
+        config: RedemptionConfig,
+        notifier: Notifier | None = None,
+        *,
+        official_announcement_sources: tuple[str, ...] = (
+            "binance",
+            "wlfi",
+            "occ",
+        ),
+    ) -> None:
+        self._status = status
+        self._pages = pages
+        self._media = media
+        self._storage = storage
+        self._config = config
+        self._notifier = notifier
+        self._official_announcement_sources = official_announcement_sources
+        self._last_runs: dict[str, datetime] = {}
+        if len(pages) != len(config.official_page_urls):
+            raise ValueError("redemption page collectors must match configured URLs")
+        canonical_page_urls = [
+            _canonical_page_url(url)[1] for url in config.official_page_urls
+        ]
+        self._page_scopes = {
+            index: f"page:{url}"
+            for index, url in enumerate(canonical_page_urls)
+        }
+        self._page_urls = dict(enumerate(canonical_page_urls))
+        if len(set(self._page_scopes.values())) != len(self._page_scopes):
+            raise ValueError("redemption page URLs must be unique")
+
+    @property
+    def tick_interval_seconds(self) -> int:
+        return min(
+            self._config.status_interval_seconds,
+            self._config.page_interval_seconds,
+        )
+
+    @staticmethod
+    def _due(
+        previous: datetime | None, now: datetime, interval_seconds: int
+    ) -> bool:
+        return previous is None or (now - previous).total_seconds() >= interval_seconds
+
+    async def check_once(
+        self,
+        *,
+        deliver: bool = True,
+        now: datetime | None = None,
+    ) -> CheckResult:
+        checked_at = now or datetime.now(UTC)
+        if checked_at.tzinfo is None or checked_at.utcoffset() is None:
+            raise ValueError("now must be timezone-aware")
+        checked_at = checked_at.astimezone(UTC)
+        errors: list[str] = []
+        details: list[str] = []
+        required_failed = False
+        jobs: list[tuple[str, int, str, Awaitable[object]]] = []
+        if self._due(
+            self._last_runs.get("status"),
+            checked_at,
+            self._config.status_interval_seconds,
+        ):
+            jobs.append(("status", -1, "status", self._status.collect(checked_at)))
+
+        for index, collector in enumerate(self._pages):
+            run_key = f"page:{index}"
+            if not self._due(
+                self._last_runs.get(run_key),
+                checked_at,
+                self._config.page_interval_seconds,
+            ):
+                continue
+            jobs.append(("page", index, run_key, collector.collect(checked_at)))
+
+        for index, collector in enumerate(self._media):
+            run_key = f"media:{index}"
+            if not self._due(
+                self._last_runs.get(run_key),
+                checked_at,
+                self._config.page_interval_seconds,
+            ):
+                continue
+            jobs.append(("media", index, run_key, collector.collect(checked_at)))
+
+        results = await asyncio.gather(
+            *(job[3] for job in jobs), return_exceptions=True
+        )
+        for (kind, index, run_key, _), result in zip(jobs, results, strict=True):
+            try:
+                if isinstance(result, BaseException):
+                    if not isinstance(result, Exception):
+                        raise result
+                    raise result
+                if kind == "status":
+                    if not isinstance(result, RedemptionStatusSnapshot):
+                        raise ValueError("redemption status returned invalid result")
+                    await self._persist_status_snapshot(result, checked_at)
+                    detail = "redemption_status checked"
+                    health_id = "redemption_status"
+                elif kind == "page":
+                    if not isinstance(result, Announcement):
+                        raise ValueError("redemption page returned invalid result")
+                    await self._persist_page(
+                        result,
+                        checked_at,
+                        scope=self._page_scopes[index],
+                        expected_url=self._page_urls[index],
+                    )
+                    detail = f"redemption_page_{index} checked"
+                    health_id = f"redemption_page_{index}"
+                else:
+                    if not isinstance(result, list) or not all(
+                        isinstance(item, Announcement) for item in result
+                    ):
+                        raise ValueError("redemption media returned invalid result")
+                    await self._persist_media(result)
+                    detail = f"redemption_media_{index} items={len(result)}"
+                    health_id = f"redemption_media_{index}"
+            except Exception as exc:
+                if kind in {"status", "page"}:
+                    required_failed = True
+                health_id = (
+                    "redemption_status"
+                    if kind == "status"
+                    else f"redemption_{kind}_{index}"
+                )
+                logger.exception("redemption collection failed source=%s", health_id)
+                error = f"{health_id}: {type(exc).__name__}: {exc}"
+                errors.append(error)
+                await _record_health(
+                    self._storage,
+                    health_id,
+                    checked_at,
+                    success=False,
+                    error=error,
+                    critical=kind in {"status", "page"},
+                )
+            else:
+                self._last_runs[run_key] = checked_at
+                details.append(detail)
+                await _record_health(
+                    self._storage,
+                    health_id,
+                    checked_at,
+                    success=True,
+                    critical=kind in {"status", "page"},
+                )
+
+        try:
+            await self._process_official_announcements(checked_at)
+            aggregate_error = await self._aggregate(
+                checked_at, allow_clear=not required_failed
+            )
+        except Exception:
+            logger.exception("redemption state persistence failed")
+            raise
+        if aggregate_error is not None:
+            errors.append(aggregate_error)
+
+        if deliver and self._notifier is not None:
+            await _deliver_pending(self._storage, self._notifier)
+        return CheckResult(not errors, tuple(errors), tuple(details))
+
+    async def _persist_status_snapshot(
+        self, snapshot: RedemptionStatusSnapshot, checked_at: datetime
+    ) -> None:
+        source_url = snapshot.observation.metadata.get("source_url")
+        observation = self._source_status_observation(
+            "status:bitgo",
+            RedemptionClassification(
+                snapshot.level,
+                snapshot.summary,
+                snapshot.matched_text,
+                snapshot.confirmed_usd1,
+            ),
+            checked_at,
+            source_url=str(source_url) if isinstance(source_url, str) else "",
+            max_age_seconds=self._config.status_interval_seconds * 3,
+            data_time=checked_at,
+            cause_key=self._cause_key(
+                str(source_url) if isinstance(source_url, str) else "",
+                "bitgo",
+            ),
+        )
+        await self._storage.insert_observation(observation)
+
+    async def _persist_page(
+        self,
+        item: Announcement,
+        checked_at: datetime,
+        *,
+        scope: str,
+        expected_url: str,
+    ) -> None:
+        if item.url != expected_url:
+            raise ValueError("official redemption page returned unexpected URL")
+        source_hint = item.source
+        item = Announcement(
+            source="redemption_page",
+            stable_id=expected_url,
+            title=item.title,
+            url=expected_url,
+            published_at=item.published_at,
+            body_hash=item.body_hash,
+            first_seen_at=item.first_seen_at,
+            metadata=item.metadata,
+        )
+        previous = await self._storage.get_announcement(item.source, item.stable_id)
+        previous_status = await self._storage.latest_observation(
+            "redemption.source_status", scope
+        )
+        connection = self._storage.connection
+        async with self._storage.write_lock:
+            await connection.execute("BEGIN IMMEDIATE")
+            try:
+                outcome = await self._storage.upsert_announcement_uncommitted(item)
+                classification = self._classify_page_change(
+                    outcome, previous, previous_status, item
+                )
+                data_time = checked_at
+                prior = self._classification_from_observation(previous_status)
+                if prior is not None and classification == prior:
+                    assert previous_status is not None
+                    data_time = self._source_data_time(previous_status)
+                await self._storage.insert_observation_uncommitted(
+                    self._source_status_observation(
+                        scope,
+                        classification,
+                        checked_at,
+                        source_url=item.url,
+                        max_age_seconds=self._config.page_interval_seconds * 2,
+                        body_hash=item.body_hash,
+                        body_sections=self._sections(item),
+                        data_time=data_time,
+                        cause_key=self._cause_key(item.url, source_hint),
+                    )
+                )
+                await connection.commit()
+            except BaseException:
+                await connection.rollback()
+                raise
+
+    @classmethod
+    def _classify_page_change(
+        cls,
+        outcome: str,
+        previous: Announcement | None,
+        previous_status: Observation | None,
+        current: Announcement,
+    ) -> RedemptionClassification:
+        clear = cls._clear_classification()
+        if outcome in {"NEW", "BASELINED"}:
+            return clear
+        prior = cls._classification_from_observation(previous_status) or clear
+        if outcome == "UNCHANGED":
+            return prior
+        previous_sections = cls._sections(previous) if previous is not None else []
+        additions = cls._new_sections(previous_sections, cls._sections(current))
+        if not additions:
+            return prior
+        candidate_text = " ".join(additions)
+        current_classification = classify_redemption(
+            candidate_text, usd1_specific=True
+        )
+        if current_classification.level is not RiskLevel.GREEN:
+            return current_classification
+        return cls._explicit_recovery_or_prior(prior, candidate_text)
+
+    async def _persist_media(self, items: list[Announcement]) -> None:
+        connection = self._storage.connection
+        async with self._storage.write_lock:
+            await connection.execute("BEGIN IMMEDIATE")
+            try:
+                for item in items:
+                    if item.source != "media_redemption":
+                        raise ValueError("redemption media item has unexpected source")
+                    await self._storage.upsert_announcement_uncommitted(item)
+                await connection.commit()
+            except BaseException:
+                await connection.rollback()
+                raise
+
+    async def _process_official_announcements(self, checked_at: datetime) -> None:
+        async with self._storage.write_lock:
+            items = await self._storage.announcements_for_sources(
+                self._official_announcement_sources
+            )
+        for item in items:
+            scope = f"announcement:{item.source}:{item.stable_id}"
+            previous_status = await self._storage.latest_observation(
+                "redemption.source_status", scope
+            )
+            if (
+                previous_status is not None
+                and previous_status.metadata.get("body_hash") == item.body_hash
+            ):
+                continue
+            sections = self._sections(item)
+            prior_sections = (
+                self._metadata_sections(previous_status.metadata)
+                if previous_status is not None
+                else []
+            )
+            candidate_sections = self._new_sections(prior_sections, sections)
+            candidate_text = " ".join(candidate_sections)
+            prior = self._classification_from_observation(previous_status)
+            event_time = (
+                checked_at
+                if previous_status is not None
+                else (item.published_at or item.first_seen_at)
+            )
+            if not candidate_text:
+                classification = prior or self._clear_classification()
+            else:
+                detected = classify_redemption(candidate_text, usd1_specific=True)
+                if detected.level is not RiskLevel.GREEN:
+                    classification = detected
+                elif prior is not None:
+                    classification = self._explicit_recovery_or_prior(
+                        prior, candidate_text
+                    )
+                else:
+                    classification = detected
+            cause_key = self._cause_key(item.url, item.source)
+
+            connection = self._storage.connection
+            async with self._storage.write_lock:
+                await connection.execute("BEGIN IMMEDIATE")
+                try:
+                    await self._storage.insert_observation_uncommitted(
+                        self._source_status_observation(
+                            scope,
+                            classification,
+                            checked_at,
+                            source_url=item.url,
+                            body_hash=item.body_hash,
+                            body_sections=sections,
+                            data_time=event_time,
+                            cause_key=cause_key,
+                        )
+                    )
+                    if (
+                        candidate_text
+                        and classification.level is RiskLevel.GREEN
+                    ):
+                        await self._clear_matching_confirmed_sources(
+                            candidate_text,
+                            item.url,
+                            checked_at,
+                            recovery_time=event_time,
+                            except_scope=scope,
+                            recovery_cause_key=cause_key,
+                        )
+                    await connection.commit()
+                except BaseException:
+                    await connection.rollback()
+                    raise
+
+    async def _clear_matching_confirmed_sources(
+        self,
+        recovery_text: str,
+        source_url: str,
+        checked_at: datetime,
+        *,
+        recovery_time: datetime,
+        except_scope: str,
+        recovery_cause_key: str,
+    ) -> None:
+        if recovery_time.tzinfo is None or recovery_time.utcoffset() is None:
+            raise ValueError("official recovery time must be timezone-aware")
+        recovery_time = recovery_time.astimezone(UTC)
+        for observation in await self._storage.latest_observations_by_scope(
+            "redemption.source_status"
+        ):
+            if observation.scope == except_scope or observation.value <= 0:
+                continue
+            if observation.metadata.get("cause_key") != recovery_cause_key:
+                continue
+            prior = self._classification_from_observation(observation)
+            if (
+                prior is None
+                or not prior.confirmed_usd1
+                or not prior.matched_text
+            ):
+                continue
+            if self._source_data_time(observation) > recovery_time:
+                continue
+            combined = classify_redemption(
+                f"{prior.matched_text} {recovery_text}",
+                usd1_specific=True,
+            )
+            if combined.level is not RiskLevel.GREEN:
+                continue
+            await self._storage.insert_observation_uncommitted(
+                self._source_status_observation(
+                    observation.scope,
+                    combined,
+                    checked_at,
+                    source_url=source_url,
+                    body_hash=str(observation.metadata.get("body_hash", "")),
+                    body_sections=self._metadata_sections(observation.metadata),
+                    data_time=recovery_time,
+                    cause_key=recovery_cause_key,
+                )
+            )
+
+    async def _aggregate(
+        self, checked_at: datetime, *, allow_clear: bool
+    ) -> str | None:
+        statuses = await self._storage.latest_observations_by_scope(
+            "redemption.source_status"
+        )
+        by_scope = {item.scope: item for item in statuses}
+        required: list[tuple[str, int]] = [
+            ("status:bitgo", self._config.status_interval_seconds * 3)
+        ]
+        required.extend(
+            (self._page_scopes[index], self._config.page_interval_seconds * 2)
+            for index in range(len(self._pages))
+        )
+        remaining_validity: list[float] = []
+        for scope, max_age in required:
+            item = by_scope.get(scope)
+            if item is None:
+                return f"redemption: required source unavailable: {scope}"
+            try:
+                age = _validated_observation_age(item.observed_at, checked_at)
+            except ValueError as exc:
+                return f"redemption: invalid source time for {scope}: {exc}"
+            if age >= max_age:
+                return f"redemption: required source stale: {scope}"
+            remaining_validity.append(max_age - age)
+        aggregate_max_age = int(min(remaining_validity))
+        if aggregate_max_age <= 0:
+            return "redemption: required source validity is too short"
+
+        active_scopes = {scope for scope, _ in required}
+        active_scopes.update(
+            item.scope
+            for item in statuses
+            if any(
+                item.scope.startswith(f"announcement:{source}:")
+                for source in self._official_announcement_sources
+            )
+        )
+        active = [item for item in statuses if item.scope in active_scopes]
+        if not active:
+            return "redemption: no source status is available"
+        winner = max(
+            active,
+            key=lambda item: (
+                item.value,
+                bool(item.metadata.get("confirmed_usd1")),
+                item.observed_at,
+                item.scope,
+            ),
+        )
+        try:
+            raw_level = RiskLevel(int(winner.value))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"invalid redemption source level for {winner.scope}"
+            ) from exc
+
+        previous_state = await self._storage.get_risk_state("redemption.channel")
+        previous_level = (
+            previous_state.level if previous_state is not None else RiskLevel.GREEN
+        )
+        previous_aggregate = await self._storage.latest_observation(
+            "redemption.channel_status", "global"
+        )
+        previous_clear_checks = 0
+        if previous_aggregate is not None:
+            value = previous_aggregate.metadata.get("clear_checks", 0)
+            if type(value) is int and value >= 0:
+                previous_clear_checks = value
+        if (
+            not allow_clear
+            and raw_level is RiskLevel.GREEN
+            and previous_level is not RiskLevel.GREEN
+        ):
+            effective_level = previous_level
+            clear_checks = 0
+        else:
+            recovery = apply_recovery(
+                previous_level,
+                raw_level,
+                previous_clear_checks,
+                required=self._config.recovery_checks,
+            )
+            effective_level = recovery.level
+            clear_checks = recovery.clear_checks
+        evidence_source = winner
+        if effective_level > raw_level and previous_aggregate is not None:
+            evidence_metadata = dict(previous_aggregate.metadata)
+        else:
+            evidence_metadata = dict(evidence_source.metadata)
+        summary = str(evidence_metadata.get("summary", "未发现官方限制"))
+        source_url = str(evidence_metadata.get("source_url", ""))
+        matched_text = evidence_metadata.get("matched_text")
+        confirmed_usd1 = bool(evidence_metadata.get("confirmed_usd1", False))
+        data_time = str(
+            evidence_metadata.get("data_time", evidence_source.observed_at.isoformat())
+        )
+        source_scope = str(
+            evidence_metadata.get("source_scope", evidence_source.scope)
+        )
+        cause_key = str(evidence_metadata.get("cause_key", ""))
+        metadata = {
+            "summary": summary,
+            "matched_text": matched_text,
+            "confirmed_usd1": confirmed_usd1,
+            "source_url": source_url,
+            "data_time": data_time,
+            "source_scope": source_scope,
+            "cause_key": cause_key,
+            "clear_checks": clear_checks,
+            "max_age_seconds": aggregate_max_age,
+        }
+        aggregate = Observation(
+            "redemption.channel_status",
+            "redemption",
+            "global",
+            float(effective_level),
+            "risk_level",
+            checked_at,
+            checked_at,
+            metadata=metadata,
+        )
+        evidence = {
+            "summary": summary,
+            "matched_text": matched_text,
+            "confirmed_usd1": confirmed_usd1,
+            "source_url": source_url,
+            "data_time": data_time,
+            "cause_key": cause_key,
+        }
+        connection = self._storage.connection
+        async with self._storage.write_lock:
+            await connection.execute("BEGIN IMMEDIATE")
+            try:
+                await self._storage.insert_observation_uncommitted(aggregate)
+                await StateEngine(self._storage).apply_uncommitted(
+                    [
+                        RuleEvaluation(
+                            "redemption.channel",
+                            effective_level,
+                            evidence,
+                            f"redemption:{cause_key}" if cause_key else "redemption:channel",
+                        )
+                    ],
+                    checked_at,
+                )
+                await connection.commit()
+            except BaseException:
+                await connection.rollback()
+                raise
+        return None
+
+    @staticmethod
+    def _clear_classification() -> RedemptionClassification:
+        return RedemptionClassification(
+            RiskLevel.GREEN, "未发现官方限制", None, False
+        )
+
+    @staticmethod
+    def _sections(item: Announcement | None) -> list[str]:
+        if item is None:
+            return []
+        raw = item.metadata.get("body_sections")
+        values = raw if isinstance(raw, list) else [item.metadata.get("body_text", "")]
+        sections = [
+            normalized
+            for value in values
+            if isinstance(value, str) and (normalized := normalize_text(value))
+        ]
+        title = normalize_text(item.title)
+        if title and title not in sections:
+            sections.insert(0, title)
+        return sections
+
+    @staticmethod
+    def _metadata_sections(metadata: dict[str, object]) -> list[str]:
+        raw = metadata.get("body_sections")
+        if not isinstance(raw, list):
+            return []
+        return [
+            normalized
+            for value in raw
+            if isinstance(value, str) and (normalized := normalize_text(value))
+        ]
+
+    @staticmethod
+    def _new_sections(previous: list[str], current: list[str]) -> list[str]:
+        previous_set = {normalize_text(value) for value in previous}
+        return [value for value in current if normalize_text(value) not in previous_set]
+
+    @staticmethod
+    def _classification_from_observation(
+        observation: Observation | None,
+    ) -> RedemptionClassification | None:
+        if observation is None:
+            return None
+        try:
+            level = RiskLevel(int(observation.value))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"invalid redemption source status for {observation.scope}"
+            ) from exc
+        raw_matched = observation.metadata.get("matched_text")
+        return RedemptionClassification(
+            level,
+            str(observation.metadata.get("summary", "未发现官方限制")),
+            raw_matched if isinstance(raw_matched, str) and raw_matched else None,
+            bool(observation.metadata.get("confirmed_usd1", False)),
+        )
+
+    @staticmethod
+    def _explicit_recovery_or_prior(
+        prior: RedemptionClassification, candidate_text: str
+    ) -> RedemptionClassification:
+        if prior.level is RiskLevel.GREEN or not prior.matched_text:
+            return prior
+        combined = classify_redemption(
+            f"{prior.matched_text} {candidate_text}", usd1_specific=True
+        )
+        return combined if combined.level is RiskLevel.GREEN else prior
+
+    @staticmethod
+    def _source_data_time(observation: Observation) -> datetime:
+        raw = observation.metadata.get("data_time")
+        if not isinstance(raw, str):
+            return observation.observed_at.astimezone(UTC)
+        try:
+            parsed = datetime.fromisoformat(raw)
+        except ValueError as exc:
+            raise ValueError(
+                f"invalid redemption source data_time for {observation.scope}"
+            ) from exc
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise ValueError(
+                f"invalid redemption source data_time for {observation.scope}"
+            )
+        return parsed.astimezone(UTC)
+
+    @staticmethod
+    def _source_status_observation(
+        scope: str,
+        classification: RedemptionClassification,
+        checked_at: datetime,
+        *,
+        source_url: str,
+        max_age_seconds: int | None = None,
+        body_hash: str = "",
+        body_sections: list[str] | None = None,
+        data_time: datetime | None = None,
+        cause_key: str,
+    ) -> Observation:
+        effective_data_time = data_time or checked_at
+        if (
+            effective_data_time.tzinfo is None
+            or effective_data_time.utcoffset() is None
+        ):
+            raise ValueError("redemption source data_time must be timezone-aware")
+        metadata: dict[str, object] = {
+            "summary": classification.summary,
+            "matched_text": classification.matched_text,
+            "confirmed_usd1": classification.confirmed_usd1,
+            "source_url": source_url,
+            "body_hash": body_hash,
+            "body_sections": body_sections or [],
+            "data_time": effective_data_time.astimezone(UTC).isoformat(),
+            "cause_key": cause_key,
+        }
+        if max_age_seconds is not None:
+            metadata["max_age_seconds"] = max_age_seconds
+        return Observation(
+            "redemption.source_status",
+            "redemption",
+            scope,
+            float(classification.level),
+            "risk_level",
+            checked_at,
+            checked_at,
+            metadata=metadata,
+        )
+
+    @staticmethod
+    def _cause_key(source_url: str, source_hint: str) -> str:
+        hostname = (urlsplit(source_url).hostname or "").casefold()
+        authorities = (
+            ("bitgo.com", "bitgo"),
+            ("worldlibertyfinancial.com", "wlfi"),
+            ("binance.com", "binance"),
+            ("occ.gov", "occ"),
+        )
+        for suffix, authority in authorities:
+            if hostname == suffix or hostname.endswith(f".{suffix}"):
+                return f"{authority}:usd1_redemption"
+        normalized_hint = source_hint.casefold()
+        for _, authority in authorities:
+            if authority in normalized_hint:
+                return f"{authority}:usd1_redemption"
+        return f"{normalized_hint}:usd1_redemption"
+
+
 class Usd1Monitor:
     def __init__(
         self,
@@ -1761,6 +2500,7 @@ class Usd1Monitor:
         reserve_supply: "ReserveSupplyMonitor | None" = None,
         information: "InformationMonitor | None" = None,
         custody: "CustodyConcentrationMonitor | None" = None,
+        redemption: "RedemptionChannelMonitor | None" = None,
         retention_days: int = 180,
         check_timeout_seconds: float = 45.0,
     ) -> None:
@@ -1775,6 +2515,7 @@ class Usd1Monitor:
         self._reserve_supply = reserve_supply
         self._information = information
         self._custody = custody
+        self._redemption = redemption
         self._retention_days = retention_days
         self._check_timeout_seconds = check_timeout_seconds
         self._last_prune: datetime | None = None
@@ -1818,6 +2559,13 @@ class Usd1Monitor:
                 self._check_component_once(
                     "custody",
                     lambda: self._custody.check_once(deliver=False),
+                )
+            )
+        if self._redemption is not None:
+            checks.append(
+                self._check_component_once(
+                    "redemption",
+                    lambda: self._redemption.check_once(deliver=False),
                 )
             )
         results = list(await asyncio.gather(*checks))
@@ -2011,6 +2759,14 @@ class Usd1Monitor:
                     "custody",
                     lambda: self._custody.check_once(deliver=False),
                     self._custody.tick_interval_seconds,
+                )
+            )
+        if self._redemption is not None:
+            checks.append(
+                (
+                    "redemption",
+                    lambda: self._redemption.check_once(deliver=False),
+                    self._redemption.tick_interval_seconds,
                 )
             )
         return checks

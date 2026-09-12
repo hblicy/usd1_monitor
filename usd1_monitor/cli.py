@@ -22,6 +22,11 @@ from usd1_monitor.collectors.announcements import (
 )
 from usd1_monitor.collectors.market import BinanceMarketCollector
 from usd1_monitor.collectors.custody import CustodyBalanceCollector
+from usd1_monitor.collectors.redemption import (
+    BitGoStatusCollector,
+    MediaRedemptionRssCollector,
+    OfficialRedemptionPageCollector,
+)
 from usd1_monitor.collectors.reserves import PorCollector
 from usd1_monitor.collectors.supply import (
     DefiLlamaSupplyCollector,
@@ -48,6 +53,7 @@ from usd1_monitor.scheduler import (
     MarketMonitor,
     NOT_MONITORED,
     ReserveSupplyMonitor,
+    RedemptionChannelMonitor,
     Usd1Monitor,
 )
 from usd1_monitor.engine.aggregate import (
@@ -275,6 +281,21 @@ def build_market_monitor(
         if config.custody.addresses
         else None
     )
+    redemption = RedemptionChannelMonitor(
+        BitGoStatusCollector(http, config.redemption.status_url),
+        [
+            OfficialRedemptionPageCollector(
+                f"redemption_page_{index}", url, http
+            )
+            for index, url in enumerate(config.redemption.official_page_urls)
+        ],
+        [
+            MediaRedemptionRssCollector(http, url)
+            for url in config.redemption.media_rss_urls
+        ],
+        storage,
+        config.redemption,
+    )
     return (
         Usd1Monitor(
             market,
@@ -285,6 +306,7 @@ def build_market_monitor(
             reserve_supply=reserve_supply,
             information=information,
             custody=custody,
+            redemption=redemption,
             retention_days=config.retention_days,
         ),
         http,

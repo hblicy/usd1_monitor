@@ -286,6 +286,45 @@ class Storage:
             for row in rows
         ]
 
+    async def latest_observations_by_scope(
+        self, metric: str
+    ) -> list[Observation]:
+        cursor = await self.connection.execute(
+            """
+            SELECT metric, source, scope, value, unit, observed_at,
+                   collected_at, quality, metadata_json
+            FROM (
+                SELECT metric, source, scope, value, unit, observed_at,
+                       collected_at, quality, metadata_json,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY scope
+                           ORDER BY observed_at DESC, id DESC
+                       ) AS row_number
+                FROM observations
+                WHERE metric = ?
+            )
+            WHERE row_number = 1
+            ORDER BY scope
+            """,
+            (metric,),
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+        return [
+            Observation(
+                metric=row["metric"],
+                source=row["source"],
+                scope=row["scope"],
+                value=row["value"],
+                unit=row["unit"],
+                observed_at=datetime.fromisoformat(row["observed_at"]),
+                collected_at=datetime.fromisoformat(row["collected_at"]),
+                quality=row["quality"],
+                metadata=json.loads(row["metadata_json"]),
+            )
+            for row in rows
+        ]
+
     async def observations_since(
         self, metrics: tuple[str, ...], since: datetime
     ) -> list[Observation]:
@@ -1585,6 +1624,42 @@ class Storage:
             if json.loads(row["metadata_json"]).get("scan_error")
         }
 
+    async def get_announcement(
+        self, source: str, stable_id: str
+    ) -> Announcement | None:
+        cursor = await self.connection.execute(
+            """
+            SELECT source, stable_id, title, url, published_at, body_hash,
+                   first_seen_at, metadata_json
+            FROM announcements
+            WHERE source = ? AND stable_id = ?
+            """,
+            (source, stable_id),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        return self._announcement_from_row(row) if row is not None else None
+
+    async def announcements_for_sources(
+        self, sources: tuple[str, ...]
+    ) -> list[Announcement]:
+        if not sources:
+            return []
+        placeholders = ",".join("?" for _ in sources)
+        cursor = await self.connection.execute(
+            f"""
+            SELECT source, stable_id, title, url, published_at, body_hash,
+                   first_seen_at, metadata_json
+            FROM announcements
+            WHERE source IN ({placeholders})
+            ORDER BY COALESCE(published_at, first_seen_at), id
+            """,
+            sources,
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+        return [self._announcement_from_row(row) for row in rows]
+
     async def latest_announcement(self, source: str) -> Announcement | None:
         cursor = await self.connection.execute(
             """
@@ -1606,6 +1681,10 @@ class Storage:
         await cursor.close()
         if row is None:
             return None
+        return self._announcement_from_row(row)
+
+    @staticmethod
+    def _announcement_from_row(row: aiosqlite.Row) -> Announcement:
         return Announcement(
             source=row["source"],
             stable_id=row["stable_id"],
