@@ -237,3 +237,30 @@ def test_readme_systemd_commands_use_home_deployment() -> None:
     for legacy_path in LEGACY_DEPLOYMENT_PATHS:
         assert legacy_path not in readme
     assert "sudo -u usd1-monitor" not in readme
+
+
+def test_readme_documents_core_risk_boundaries_and_rpc_budget() -> None:
+    readme = Path("README.md").read_text(encoding="utf-8")
+
+    for required in (
+        "官方来源明确列出，或两个相互独立的公开标签来源一致",
+        "90 天",
+        "candidate 仅展示",
+        "已核验地址下限",
+        "Solana 只计算净余额差",
+        "por.coverage_max_age_seconds",
+        "达到 30 分钟（默认 1800 秒）即",
+        "覆盖率为 UNKNOWN",
+        "por.yellow_staleness_seconds",
+        "por.red_staleness_seconds",
+        "用途不同",
+        "未发现官方限制",
+        "不等于主动赎回成功",
+        "媒体线索不告警",
+        "EVM：约 13.82–14.28 万次/月",
+        "Solana：约 3.02–3.12 万次/月",
+        "合计约 16.85–17.41 万次/月",
+        "命中可信 EVM 地址的唯一 Transfer 区块数",
+        "每个相关区块只补取一次时间戳",
+    ):
+        assert required in readme

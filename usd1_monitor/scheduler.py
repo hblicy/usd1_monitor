@@ -2890,11 +2890,14 @@ class Usd1Monitor:
         )
         if self._reserve_supply is not None:
             monitored.append("储备与供应量")
+            monitored.append("储备覆盖率")
             monitored.append("完整多链供应量与桥接核对")
         if self._information is not None:
             monitored.append("官方公告")
         if self._custody is not None:
-            monitored.append("Binance 已核验地址集中度与资金变化")
+            monitored.append("已核验 Binance 地址集中度与资金流")
+        if self._redemption is not None:
+            monitored.append("官方赎回通道")
         try:
             await self._notifier.send_text(
                 format_startup_message(monitored, NOT_MONITORED)

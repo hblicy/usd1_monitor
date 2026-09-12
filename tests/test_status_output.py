@@ -6,7 +6,7 @@ from usd1_monitor.cli import _print_status
 from usd1_monitor.engine.state import StateEngine
 from usd1_monitor.models import RiskLevel, RuleEvaluation
 from usd1_monitor.models import Observation
-from usd1_monitor.scheduler import NOT_MONITORED
+from usd1_monitor.scheduler import NOT_MONITORED, Usd1Monitor
 from usd1_monitor.engine.aggregate import business_overall, health_overall
 
 
@@ -76,6 +76,45 @@ def test_status_names_every_non_monitored_capability() -> None:
 def test_full_multichain_reconciliation_is_no_longer_not_monitored() -> None:
     assert "full_multichain_supply_reconciliation" not in NOT_MONITORED
     assert "tron_solana_aptos_tempo_bridges" in NOT_MONITORED
+
+
+@pytest.mark.asyncio
+async def test_startup_message_lists_core_asset_monitors_without_media_claims(
+    storage,
+) -> None:
+    class RecordingNotifier:
+        messages: list[str] = []
+
+        async def send_text(self, content: str) -> None:
+            self.messages.append(content)
+
+    notifier = RecordingNotifier()
+    monitor = Usd1Monitor(
+        object(),
+        [],
+        storage,
+        notifier,
+        reserve_supply=object(),
+        custody=object(),
+        redemption=object(),
+    )
+
+    await monitor.send_startup_once()
+
+    message = notifier.messages[0]
+    assert "已核验 Binance 地址集中度与资金流" in message
+    assert "储备覆盖率" in message
+    assert "官方赎回通道" in message
+    assert "媒体风险监控" not in message
+
+
+@pytest.mark.asyncio
+async def test_status_unknown_lists_all_three_missing_pillars(storage, capsys) -> None:
+    await _print_status(storage)
+
+    output = capsys.readouterr().out
+    assert "business_overall: UNKNOWN" in output
+    assert "missing_pillars: concentration,coverage,redemption" in output
 
 
 @pytest.mark.asyncio
