@@ -641,6 +641,7 @@ async def test_snapshot_uses_alert_text_and_falls_back_to_readable_rule_label(
 ) -> None:
     await storage.set_risk_state("market.price", RiskLevel.RED, NOW, NOW)
     await storage.set_risk_state("por.age", RiskLevel.YELLOW, NOW, NOW)
+    await storage.set_risk_state("redemption.channel", RiskLevel.YELLOW, NOW, NOW)
     await storage.insert_pending_alert_uncommitted(
         f"rule:0:market.price:{NOW.isoformat()}",
         "hash",
@@ -660,6 +661,9 @@ async def test_snapshot_uses_alert_text_and_falls_back_to_readable_rule_label(
     }
     health_items = {item["rule_id"]: item for item in snapshot["health"]["items"]}
     assert business_items["market.price"]["summary"] == "USD1 价格低于风险阈值"
+    assert business_items["redemption.channel"]["summary"] == (
+        "USD1 官方赎回通道出现异常"
+    )
     assert "por.age" not in business_items
     assert health_items["por.age"]["summary"] == "USD1 储备数据长时间没有更新"
 

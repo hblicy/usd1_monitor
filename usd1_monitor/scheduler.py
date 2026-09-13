@@ -2136,37 +2136,46 @@ class RedemptionChannelMonitor:
             previous_status = await self._storage.latest_observation(
                 "redemption.source_status", scope
             )
-            if (
+            same_body = (
                 previous_status is not None
                 and previous_status.metadata.get("body_hash") == item.body_hash
-            ):
-                continue
-            sections = self._sections(item)
-            prior_sections = (
-                self._metadata_sections(previous_status.metadata)
-                if previous_status is not None
-                else []
             )
-            candidate_sections = self._new_sections(prior_sections, sections)
-            candidate_text = " ".join(candidate_sections)
+            sections = self._sections(item)
             prior = self._classification_from_observation(previous_status)
             event_time = (
                 checked_at
                 if previous_status is not None
                 else (item.published_at or item.first_seen_at)
             )
-            if not candidate_text:
-                classification = prior or self._clear_classification()
+            if same_body:
+                if prior is None or prior.level is RiskLevel.GREEN:
+                    continue
+                classification = classify_redemption(
+                    " ".join(sections), usd1_specific=True
+                )
+                if classification == prior:
+                    continue
+                candidate_text = ""
             else:
-                detected = classify_redemption(candidate_text, usd1_specific=True)
-                if detected.level is not RiskLevel.GREEN:
-                    classification = detected
-                elif prior is not None:
-                    classification = self._explicit_recovery_or_prior(
-                        prior, candidate_text
-                    )
+                prior_sections = (
+                    self._metadata_sections(previous_status.metadata)
+                    if previous_status is not None
+                    else []
+                )
+                candidate_sections = self._new_sections(prior_sections, sections)
+                candidate_text = " ".join(candidate_sections)
+                if not candidate_text:
+                    classification = prior or self._clear_classification()
                 else:
-                    classification = detected
+                    detected = classify_redemption(candidate_text, usd1_specific=True)
+                    if detected.level is not RiskLevel.GREEN:
+                        classification = detected
+                    elif prior is not None:
+                        classification = self._explicit_recovery_or_prior(
+                            prior, candidate_text
+                        )
+                    else:
+                        classification = detected
             cause_key = self._cause_key(item.url, item.source)
 
             connection = self._storage.connection

@@ -41,6 +41,7 @@ RULE_LABELS = {
     "por.reserve_change": "USD1 储备数据发生明显变化",
     "supply.collateralization": "USD1 储备与供应量不匹配",
     "supply.multichain": "USD1 多链供应量核对异常",
+    "redemption.channel": "USD1 官方赎回通道出现异常",
     "evm.ethereum": "Ethereum 合约状态发生变化",
     "evm.bsc": "BNB Chain 合约状态发生变化",
     "health.evm_ethereum": "Ethereum 链上数据获取异常",

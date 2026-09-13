@@ -192,6 +192,24 @@ class Storage:
         await self._ensure_column(
             "collector_health", "first_failure_at", "TEXT"
         )
+        await self._connection.execute(
+            """
+            DELETE FROM risk_states
+            WHERE rule_id IN (
+                'health.supply_ethereum',
+                'health.supply_bsc'
+            )
+            """
+        )
+        await self._connection.execute(
+            """
+            DELETE FROM collector_health
+            WHERE collector_id IN (
+                'supply_ethereum',
+                'supply_bsc'
+            )
+            """
+        )
         await self._connection.commit()
 
     async def _ensure_column(

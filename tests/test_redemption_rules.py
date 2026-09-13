@@ -35,6 +35,17 @@ def test_required_redemption_classification_examples(
     assert classify_redemption(text, usd1_specific=usd1_specific).level is expected
 
 
+def test_hypothetical_risk_disclosure_is_not_an_active_redemption_incident() -> None:
+    text = (
+        "A rapid spike in USD1 redemption requests may outpace liquidity, "
+        "leading to delays, forced asset sales, or a run on USD1"
+    )
+
+    result = classify_redemption(text, usd1_specific=True)
+
+    assert result.level is RiskLevel.GREEN
+
+
 def test_redemption_rule_values_are_frozen() -> None:
     classification = RedemptionClassification(
         RiskLevel.RED,
