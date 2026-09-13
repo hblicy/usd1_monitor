@@ -147,6 +147,11 @@ _DYNAMIC_MODAL_CONTEXT = re.compile(
     r"reports?|current(?:ly)?)\b",
     re.IGNORECASE,
 )
+_HYPOTHETICAL_CONSEQUENCE = re.compile(
+    r"\b(?:may|can|could)\b[^.!?;。！？；]*"
+    r"\b(?:lead(?:ing)?|result(?:ing)?)\s+to\b",
+    re.IGNORECASE,
+)
 _LEADING_HISTORICAL_SUMMARY = re.compile(
     r"^\s*(?:resolved\s+incident\b|historically\b|previously\b|formerly\b)",
     re.IGNORECASE,
@@ -294,6 +299,10 @@ def _predicate_is_nonactual(
     if _CONDITIONAL_BEFORE.search(prefix):
         return True
     if _MODAL_BEFORE.search(prefix) and _STATIC_MODAL_CONTEXT.search(segment):
+        return True
+    if _HYPOTHETICAL_CONSEQUENCE.search(segment) and not _DYNAMIC_MODAL_CONTEXT.search(
+        segment
+    ):
         return True
     if subject_to_is_static and _MODAL_BEFORE.search(prefix):
         return True

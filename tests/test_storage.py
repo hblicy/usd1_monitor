@@ -485,6 +485,31 @@ async def test_open_migrates_legacy_delivery_statuses(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_open_removes_only_retired_supply_health_records(tmp_path: Path) -> None:
+    db_path = tmp_path / "legacy-health.db"
+    now = datetime(2026, 9, 13, tzinfo=UTC)
+    storage = Storage(db_path)
+    await storage.open()
+    for collector_id in ("supply_ethereum", "supply_bsc", "active_collector"):
+        await storage.record_collector_failure(collector_id, now, "old failure")
+        await storage.set_risk_state(
+            f"health.{collector_id}", RiskLevel.YELLOW, now, now
+        )
+    await storage.close()
+
+    reopened = Storage(db_path)
+    await reopened.open()
+    try:
+        for collector_id in ("supply_ethereum", "supply_bsc"):
+            assert await reopened.get_collector_health(collector_id) is None
+            assert await reopened.get_risk_state(f"health.{collector_id}") is None
+        assert await reopened.get_collector_health("active_collector") is not None
+        assert await reopened.get_risk_state("health.active_collector") is not None
+    finally:
+        await reopened.close()
+
+
+@pytest.mark.asyncio
 async def test_alert_delivery_can_only_be_claimed_once(storage) -> None:
     await StateEngine(storage).apply(
         [RuleEvaluation("market.price", RiskLevel.YELLOW)],

@@ -12,6 +12,10 @@ from usd1_monitor.scheduler import RedemptionChannelMonitor
 
 
 NOW = datetime(2026, 9, 11, 4, 0, tzinfo=UTC)
+RISK_DISCLOSURE_TEXT = (
+    "A rapid spike in USD1 redemption requests may outpace liquidity, "
+    "leading to delays, forced asset sales, or a run on USD1"
+)
 
 
 def _announcement(
@@ -222,6 +226,52 @@ async def test_redemption_baseline_is_clear_without_alert(storage) -> None:
         "redemption.source_status", "page:https://www.bitgo.com/usd1"
     )
     assert source is not None and source.value == RiskLevel.GREEN
+
+
+@pytest.mark.asyncio
+async def test_unchanged_official_warning_is_reclassified_after_rule_update(
+    storage,
+) -> None:
+    item = _announcement(
+        "wlfi",
+        "/usd1-token/usd1-risk-disclosures",
+        [RISK_DISCLOSURE_TEXT],
+    )
+    await storage.upsert_announcement(item)
+    scope = "announcement:wlfi:/usd1-token/usd1-risk-disclosures"
+    await storage.insert_observation(
+        Observation(
+            "redemption.source_status",
+            "redemption",
+            scope,
+            float(RiskLevel.YELLOW),
+            "risk_level",
+            NOW,
+            NOW,
+            metadata={
+                "summary": "USD1 官方赎回可能延迟或受限",
+                "matched_text": RISK_DISCLOSURE_TEXT,
+                "confirmed_usd1": True,
+                "source_url": item.url,
+                "body_hash": item.body_hash,
+                "body_sections": [RISK_DISCLOSURE_TEXT],
+                "data_time": NOW.isoformat(),
+                "cause_key": "wlfi:usd1_redemption",
+            },
+        )
+    )
+    await storage.set_risk_state(
+        "redemption.channel", RiskLevel.YELLOW, NOW, NOW
+    )
+    monitor = _monitor(storage, statuses=[_status(), _status()])
+
+    await monitor.check_once(deliver=False, now=NOW + timedelta(minutes=5))
+    source = await storage.latest_observation("redemption.source_status", scope)
+    assert source is not None and source.value == RiskLevel.GREEN
+
+    await monitor.check_once(deliver=False, now=NOW + timedelta(minutes=10))
+    state = await storage.get_risk_state("redemption.channel")
+    assert state is not None and state.level is RiskLevel.GREEN
 
 
 @pytest.mark.asyncio
